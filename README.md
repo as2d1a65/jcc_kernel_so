@@ -73,7 +73,13 @@ jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 
 `OP_CMD_READ`(601) 读成功时返回值是 `-1`。判断成功必须看**数据**，不看返回码。`drv_read()` 用 `0xCC` 哨兵判定：读前填 `0xCC`，读后全还是 `0xCC` 才算失败。
 
-### 2.4 通道不需要设备节点
+### 2.4 重启后 RT 驱动消失，且不能用 /proc/modules 判断
+
+`rtload` 装完的驱动自己也会摘链表，`grep rtqdnb9 /proc/modules` 恒为 0。唯一可靠判据是 `jccd base <pid> libc.so` 是否非 0。
+
+驱动不在时，`ioctl(601/603)` 失败，早期版本的 `drv_read` 会把它当成"读到 0"，看起来一切正常实际全是垃圾。现在的 `drv_read` 先查 `/proc/<pid>/maps`，未映射直接返回失败。
+
+### 2.5 通道不需要设备节点
 
 驱动 hook 的是 `sys_ioctl`，认 `cmd` 号（601~628）不认文件描述符。所以 `open("/dev/null")` 就够，**磁盘上零新增节点**，`/dev` 里干净。
 
@@ -147,6 +153,20 @@ clang --target=aarch64-linux-android28 -O2 -fuse-ld=lld -pie \
 
 ## 4. 用法
 
+### 4.0 上机前必查（踩过两次的坑）
+
+**每次重启后 RT 驱动都消失了，必须先重载**，否则所有 `jccd` 命令都"成功"但读到全零：
+
+```bash
+su -c "/data/local/tmp/rtload"        # 打印「驱动加载成功」
+```
+
+注意：RT 驱动自己也会隐藏，所以 `grep rtqdnb9 /proc/modules` 永远是 0，**不能用它判断驱动在不在**。判据只有一个：`jccd base <pid> libc.so` 返回非 0。
+
+第二坑：`jccd` 的读现在会先查 `/proc/<pid>/maps`，地址没映射直接判失败；读到全零不再是"成功"。见 2.3。
+
+### 4.1 命令
+
 前提：RT 驱动（`rtload`）已加载，`jcck.ko` 已加载且 `hide=1`。
 
 ```bash
@@ -168,8 +188,11 @@ jccd watch   <pid> <func_addr> <秒> <最多记录数>
 # 触摸注入自检（会注册一个虚拟输入设备，并在 (540,1200) 点一下）
 jccd touchtest
 
-# 内存读写
-jccd read  <pid> <addr> <len>
+# 内存读写与对象图
+jccd read  <pid> <addr> <len>          十六进制
+jccd dump  <pid> <addr> <len>          hexdump + ASCII（最长 1 MB）
+jccd str   <pid> <addr> [maxlen]       读 C 字符串
+jccd ptr   <pid> <addr> [depth]        顺着指针链跟
 jccd write <pid> <addr> <hex32>
 ```
 

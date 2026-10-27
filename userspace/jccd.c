@@ -319,6 +319,79 @@ int main(int argc, char **argv)
     }
 
 
+    if (!strcmp(cmd, "dump")) {
+        uintptr_t a = (uintptr_t)hx(argv[3]);
+        long len = (argc > 4) ? (long)hx(argv[4]) : 64;
+        unsigned char *buf;
+        long i, off = 0;
+
+        if (len <= 0 || len > (1 << 20)) { printf("len out of range\n"); return 1; }
+        buf = malloc((size_t)len);
+        if (!buf) return 1;
+        if (drv_read(a, buf, (size_t)len) != 0) {
+            /* ???????? 64 ???????????? ?? */
+            memset(buf, 0, (size_t)len);
+            for (off = 0; off < len; off += 64) {
+                long chunk = (len - off > 64) ? 64 : (len - off);
+                if (drv_read(a + (uintptr_t)off, buf + off, (size_t)chunk) != 0)
+                    memset(buf + off, 0xCD, (size_t)chunk);
+            }
+        }
+        for (off = 0; off < len; off += 16) {
+            long k, n = (len - off > 16) ? 16 : (len - off);
+            printf("%016lx  ", (unsigned long)(a + (uintptr_t)off));
+            for (k = 0; k < 16; k++) {
+                if (k < n) printf("%02x ", buf[off + k]);
+                else printf("   ");
+                if (k == 7) printf(" ");
+            }
+            printf(" |");
+            for (k = 0; k < n; k++) {
+                unsigned char c = buf[off + k];
+                printf("%c", (c >= 0x20 && c < 0x7f) ? c : '.');
+            }
+            printf("|\n");
+        }
+        free(buf);
+        return 0;
+    }
+
+    if (!strcmp(cmd, "str")) {
+        uintptr_t a = (uintptr_t)hx(argv[3]);
+        long maxlen = (argc > 4) ? atol(argv[4]) : 256;
+        char *buf;
+        long i;
+
+        if (maxlen <= 0 || maxlen > 4096) maxlen = 256;
+        buf = malloc((size_t)maxlen + 1);
+        if (!buf) return 1;
+        memset(buf, 0, (size_t)maxlen + 1);
+        if (drv_read(a, buf, (size_t)maxlen) != 0) { printf("read failed\n"); free(buf); return 3; }
+        buf[maxlen] = 0;
+        printf("\"");
+        for (i = 0; i < maxlen && buf[i]; i++) {
+            unsigned char c = (unsigned char)buf[i];
+            printf("%c", (c >= 0x20 && c < 0x7f) ? c : '.');
+        }
+        printf("\"  (len=%ld)\n", i);
+        free(buf);
+        return 0;
+    }
+
+    if (!strcmp(cmd, "ptr")) {
+        uintptr_t a = (uintptr_t)hx(argv[3]);
+        int depth = (argc > 4) ? atoi(argv[4]) : 1;
+        int d;
+        for (d = 0; d < depth; d++) {
+            uint64_t v = 0;
+            if (drv_read(a, &v, 8) != 0) { printf("  [%d] read failed @0x%lx\n", d, (unsigned long)a); return 3; }
+            printf("  [%d] *(0x%lx) = 0x%lx\n", d, (unsigned long)a, (unsigned long)v);
+            if (!v || v < 0x1000) break;
+            a = (uintptr_t)v;
+        }
+        return 0;
+    }
+
     if (!strcmp(cmd, "touch")) {
         int x = atoi(argv[2]), y = (argc > 3) ? atoi(argv[3]) : 0;
         drv_touch_init(1080, 2400);
