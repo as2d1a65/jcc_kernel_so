@@ -39,7 +39,8 @@ jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 | `base` | `libc.so` → `0x7b640d0000`，与 `/proc/<pid>/maps` 一致 |
 | `sym` | 目标进程内 ELF 解析，`malloc` → `0x7b641217cc`，入口首指令 `3f 23 03 d5`（`paciasp`），地址正确 |
 | `capture` | 挂 `strlen` 入口抓 x0，`captured_x0 = 0x5f7690d69d`，与探针字符串指针**逐位相同**，可复现 |
-| `touch` | 未测 |
+| `watch` | 循环重挂抓多次，2 秒内拿到 2 个不同 x0（正好对应靶子的两个缓冲区），re-arm 逻辑正确 |
+| `touch` | `touch_init` → `/proc/bus/input/devices` 从 10 条变 11 条（虚拟输入设备注册成功）；`down`/`up` 均 rc=0；`destroy` rc=0 |
 
 `capture` 就是拿游戏对象的那个原语：换成 `CSoGame_FrameTimeTick` 的入口，`captured_x0` 即 `CSoGame*`。
 
@@ -76,7 +77,11 @@ jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 
 驱动 hook 的是 `sys_ioctl`，认 `cmd` 号（601~628）不认文件描述符。所以 `open("/dev/null")` 就够，**磁盘上零新增节点**，`/dev` 里干净。
 
-### 2.5 KernelSU 的两个门槛
+### 2.5 `TouchEvent` 的 `slot_mask` 不能为 0
+
+`touch_event.slot_mask` 校验是 `!slot_mask || (slot_mask & ~0x3ff)` → `EINVAL`。**抬手指（`TOUCH_UP`）也必须给非零掩码**（例如 `1`），传 0 会失败。这和常见触摸注入 API 的习惯相反，是个容易踩的坑。
+
+### 2.6 KernelSU 的两个门槛
 
 1. `.modinfo` 必须带 `import_ns=VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver`，否则加载直接 `EPERM`。
 2. `su` 的 `CapEff` 是 `0`（只给 uid 0 不给 capability），`insmod` / `finit_module` 全 `EPERM`，必须用 `init_module()` syscall 把模块内容直接喂内核——见 `userspace/` 里 `kload` 的思路（`tools/` 未附，代码见 Commit 历史或自行按 ABI 实现）。
@@ -157,6 +162,12 @@ jccd sym <pid> libc.so malloc veneer
 # 抓函数入口的 x0（拿游戏对象的核心原语）
 jccd capture <pid> <func_addr> <秒> 2
 
+# 循环抓多次，只打印新出现的 x0
+jccd watch   <pid> <func_addr> <秒> <最多记录数>
+
+# 触摸注入自检（会注册一个虚拟输入设备，并在 (540,1200) 点一下）
+jccd touchtest
+
 # 内存读写
 jccd read  <pid> <addr> <len>
 jccd write <pid> <addr> <hex32>
@@ -168,9 +179,8 @@ jccd write <pid> <addr> <hex32>
 
 1. **`rmmod` 会触发内核 panic → 重启。** 根因在 `unregister_kretprobe`：此内核在模块内存释放后仍会访问 kprobe 实例池。所以 `__exit` 里**故意不注销** kretprobe，模块设计成「装一次、跑到重启」。这是目前唯一的硬限制，也是刻意接受的取舍。
 2. **maps 过滤没做。** `show_map_vma` 被编译器内联，kretprobe 不触发；改挂 `m_next` / `show_map` 均导致加载后 panic；改 `proc_pid_maps_op.show` 指针有启动循环风险，主动放弃。替代方案是 payload 走匿名段投递——`/proc/pid/maps` 里就是一条普通 `anon` 行，本来无需隐藏。
-3. **`HWBP_*` 通道未打通**，见 2.1。
-4. **`touch` 注入未验证。**
-5. `prebuilt/` 里的二进制只对应上述那台设备的内核，换机器必须重编。
+3. **`HWBP_*` 通道未打通**，见 2.1。用 `HOOK_ATTACH` + `HOOK_SET_ROT` 替代。
+4. `prebuilt/` 里的二进制只对应上述那台设备的内核，换机器必须重编。
 
 ---
 

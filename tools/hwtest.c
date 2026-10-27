@@ -5,7 +5,8 @@
 
 typedef size_t (*fn_t)(const char *);
 static volatile int sink;
-static const char probe[] = "JCC-CAPTURE-X0-PROBE";
+static char bufA[] = "PROBE-A";
+static char bufB[] = "PROBE-BB";
 
 int main(int argc, char **argv)
 {
@@ -16,11 +17,12 @@ int main(int argc, char **argv)
 
     if (!f) { printf("dlsym %s failed\n", nm); return 1; }
     vf = f;
-    printf("pid=%d sym=%s addr=%p probe=%p (%s)\n", getpid(), nm, (void *)f, (void *)probe, probe);
+    printf("pid=%d sym=%s addr=%p A=%p B=%p\n", getpid(), nm, (void *)f, (void *)bufA, (void *)bufB);
     fflush(stdout);
 
     for (;;) {
-        sink += (int)vf(probe);
-        if ((++i & 0x3ffff) == 0) usleep(500);
+        const char *p = (i & 1) ? bufA : bufB;
+        sink += (int)vf(p);
+        if ((++i & 0x1ffff) == 0) usleep(500);
     }
 }

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 
 static long hx(const char *s) { return strtol(s, NULL, 16); }
 
@@ -88,7 +89,7 @@ static uintptr_t follow_veneer(uintptr_t a)
 
 int main(int argc, char **argv)
 {
-    if (argc < 3) {
+    if (argc < 2 || (argc < 3 && strcmp(argv[1], "touchtest") != 0)) {
         printf("usage:\n");
         printf("  jccd base  <pid> <module>\n");
         printf("  jccd sym   <pid> <module> <symbol> [veneer]\n");
@@ -99,6 +100,29 @@ int main(int argc, char **argv)
         return 1;
     }
     const char *cmd = argv[1];
+
+    if (!strcmp(cmd, "touchtest")) {
+        int before = 0, after = 0, k;
+        char line[256];
+        FILE *f;
+
+        f = fopen("/proc/bus/input/devices", "r");
+        if (f) { while (fgets(line, sizeof(line), f)) if (strstr(line, "Name=")) before++; fclose(f); }
+        printf("input devices before = %d\n", before);
+        printf("touch_init(1080,2400) rc=%d errno=%d\n", drv_touch_init(1080, 2400), errno);
+        usleep(200000);
+        f = fopen("/proc/bus/input/devices", "r");
+        if (f) { while (fgets(line, sizeof(line), f)) if (strstr(line, "Name=")) after++; fclose(f); }
+        printf("input devices after  = %d\n", after);
+        for (k = 0; k < 1; k++) {
+            printf("down rc=%d\n", drv_touch(J_TOUCH_DOWN, 540, 1200, 1));
+            usleep(80000);
+            printf("up   rc=%d\n", drv_touch(J_TOUCH_UP, 540, 1200, 1));
+        }
+        printf("touch_destroy rc=%d\n", drv_touch_destroy());
+        return (after > before) ? 0 : 6;
+    }
+
     int pid = atoi(argv[2]);
     if (drv_attach(pid) != 0) { printf("attach %d failed\n", pid); return 2; }
 
@@ -265,6 +289,36 @@ int main(int argc, char **argv)
         return st.captured_x0 ? 0 : 5;
     }
 
+    if (!strcmp(cmd, "watch")) {
+        uintptr_t a = (uintptr_t)hx(argv[3]);
+        int sec  = (argc > 4) ? atoi(argv[4]) : 3;
+        int maxn = (argc > 5) ? atoi(argv[5]) : 12;
+        uint64_t seen[64]; int nseen = 0, round = 0;
+        J_HOOK_STATUS st;
+        time_t t0 = time(NULL);
+
+        while ((int)(time(NULL) - t0) < sec && nseen < maxn && round < 4096) {
+            uint64_t x0 = 0; int dup = 0, i;
+            round++;
+            if (drv_hook_attach(pid, a) != 0) break;
+            drv_hook_set_rot(2, NULL, 0);
+            for (i = 0; i < 200; i++) {
+                usleep(300);
+                if (drv_hook_status(&st) == 0 && st.captured_x0) { x0 = st.captured_x0; break; }
+            }
+            drv_hook_detach();
+            if (!x0) continue;
+            for (i = 0; i < nseen; i++) if (seen[i] == x0) { dup = 1; break; }
+            if (!dup) {
+                printf("NEW x0 = 0x%lx (round %d)\n", (unsigned long)x0, round);
+                if (nseen < 64) seen[nseen++] = x0;
+            }
+        }
+        printf("distinct x0 = %d (rounds=%d, time=%ds)\n", nseen, round, sec);
+        return nseen ? 0 : 5;
+    }
+
+
     if (!strcmp(cmd, "touch")) {
         int x = atoi(argv[2]), y = (argc > 3) ? atoi(argv[3]) : 0;
         drv_touch_init(1080, 2400);
@@ -272,7 +326,7 @@ int main(int argc, char **argv)
         printf("  rc=%d\n", drv_touch(J_TOUCH_DOWN, x, y, 1));
         usleep(60000);
         printf("up\n");
-        printf("  rc=%d\n", drv_touch(J_TOUCH_UP, x, y, 0));
+        printf("  rc=%d\n", drv_touch(J_TOUCH_UP, x, y, 1));
         drv_touch_destroy();
         return 0;
     }
