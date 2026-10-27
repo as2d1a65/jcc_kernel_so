@@ -1,6 +1,6 @@
-# jcc_kernel_so
+﻿# jcc_kernel_so
 
-金铲铲之战（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
+jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 
 内核侧基于 RT-hook（xinhook）驱动之上的**独立模块** `jcck`，用户态是一套不依赖任何注入器的驱动客户端。
 
