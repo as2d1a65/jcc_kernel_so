@@ -1,0 +1,7 @@
+*.o
+*.mod
+*.mod.c
+.tmp_*
+modules.order
+Module.symvers.bak
+.git-home
