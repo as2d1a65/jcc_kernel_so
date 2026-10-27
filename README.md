@@ -198,6 +198,31 @@ jccd write <pid> <addr> <hex32>
 
 ---
 
+## 4.2 暴露面审计（比封号优先级用）
+
+`tools/jccaudit.c` → `jccaudit <pid>`，从外部把目标进程对外暴露的可疑痕迹全部量出来：
+
+```bash
+jccaudit <game_pid>
+```
+
+输出六段：`TracerPid`/`Threads`、可疑映射、可疑线程名、本进程 unix socket（按 fd inode 关联）、沙箱残留文件、`/proc/<pid>/mem` 可写性。
+
+### 实测基线（systemui，完全干净的系统进程）
+
+| 指标 | 干净值 |
+|---|---|
+| `TracerPid` | 0 |
+| **memfd 映射数** | **7**（ART 的 `jit-zygote-cache` / `jit-cache`） |
+| **匿名可执行段数** | **1**（只有 `[vdso]`） |
+| 线程数 | 171 |
+
+**结论一：memfd 不是检测信号。** 干净进程本来就有 7 条 memfd 映射，ART 用 memfd 做 JIT 缓存。所以内存加载 payload 时用 memfd 完全混在噪声里。
+
+**结论二：匿名可执行段数是可用信号。** 干净进程只有 1 条（`[vdso]`）。往进程里写一段匿名 `r-xp` 会让这个数变成 2 以上。Unity 游戏自己有 JIT，需要先测游戏自己的基线才知道噪声有多大。
+
+**结论三：`TracerPid` 是唯一零误报的硬信号。** 一个字段、一行字、无需任何启发式。**所以去掉 ptrace 是封号风险优化的第一优先级，收益远大于其他所有项之和。**
+
 ## 5. 已知限制
 
 1. **`rmmod` 会触发内核 panic → 重启。** 根因在 `unregister_kretprobe`：此内核在模块内存释放后仍会访问 kprobe 实例池。所以 `__exit` 里**故意不注销** kretprobe，模块设计成「装一次、跑到重启」。这是目前唯一的硬限制，也是刻意接受的取舍。
