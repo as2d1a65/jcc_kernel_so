@@ -7,6 +7,8 @@ jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 > **接手开发先读 [`docs/HANDOFF.md`](docs/HANDOFF.md)** —— 总交接文档：环境基线、已验证能力、关键 ABI 坑、内核模块编译的完整步骤与三个自检点、检测面分析、分阶段开发路线。
 >
 > 静态资料清单见 [`docs/static-inventory.md`](docs/static-inventory.md)。
+>
+> 第三方内核驱动（RT-hook）及其 ABI 说明见 [`driver/README.md`](driver/README.md)。
 
 ---
 
@@ -247,8 +249,15 @@ userspace/   jccdrv.h/.c   驱动客户端封装
              kernel.h     RT 驱动原始 ABI 头（参考）
 tools/       hwtest.c      带 volatile 函数指针的热循环靶子
              runtest.sh
+driver/      rtload        第三方 RT-hook 驱动（已验证可用，MD5 ea018259…）
+             6.1.sh 等     10 个内核版本各自的自提取脚本
+             kernel.h      驱动用户态 ABI
+             analysis/     当初逆 ABI 用的脚本
 prebuilt/    jcck_v8.ko    已验证可加载的模块
              jccd          arm64 用户态工具
+             jccaudit      暴露面审计工具
+docs/        HANDOFF.md    总交接文档（先读这个）
+             static-inventory.md  libdemo.so 明文清单
 ```
 
 `tools/hwtest.c` 里那个 `volatile fn_t` 是必需的：不加的话 clang 会把 `getpid()` 之类内联成 `svc #0`，压根不经过被钩的地址，抓不到任何命中。
