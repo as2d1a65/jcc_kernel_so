@@ -4,6 +4,10 @@ jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 
 内核侧基于 RT-hook（xinhook）驱动之上的**独立模块** `jcck`，用户态是一套不依赖任何注入器的驱动客户端。
 
+> **接手开发先读 [`docs/HANDOFF.md`](docs/HANDOFF.md)** —— 总交接文档：环境基线、已验证能力、关键 ABI 坑、内核模块编译的完整步骤与三个自检点、检测面分析、分阶段开发路线。
+>
+> 静态资料清单见 [`docs/static-inventory.md`](docs/static-inventory.md)。
+
 ---
 
 ## 1. 已验证的结果（实测，非推断）
