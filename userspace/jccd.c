@@ -101,6 +101,7 @@ int main(int argc, char **argv)
     }
     const char *cmd = argv[1];
 
+
     if (!strcmp(cmd, "touchtest")) {
         int before = 0, after = 0, k;
         char line[256];
@@ -126,6 +127,30 @@ int main(int argc, char **argv)
     int pid = atoi(argv[2]);
     if (drv_attach(pid) != 0) { printf("attach %d failed\n", pid); return 2; }
 
+    if (!strcmp(cmd, "regs")) {
+        uintptr_t a = (uintptr_t)hx(argv[3]);
+        int sec = (argc > 4) ? atoi(argv[4]) : 2;
+        J_HOOK_STATUS st;
+        int i, waited = 0;
+
+        if (drv_hook_attach(pid, a) != 0) { printf("attach failed\n"); return 3; }
+        printf("set_rot(2) rc=%d\n", drv_hook_set_rot(2, NULL, 0));
+        while (waited < sec * 100 && drv_hook_status(&st) == 0 && !st.captured_x0) {
+            usleep(10000); waited++;
+        }
+        printf("status: active=%u armed=%u hits=%lu x0=0x%lx\n",
+               st.active, st.armed, (unsigned long)st.hit_count, (unsigned long)st.captured_x0);
+        if (st.captured_x0) {
+            printf("--- ?? HOOK_READREG ??? x0..x30 ---\n");
+            for (i = 0; i <= 30; i++) {
+                uint64_t v = 0, hc = 0;
+                if (drv_hook_readreg((uint32_t)i, &v, &hc) == 0 && v)
+                    printf("  x%-2d = 0x%016lx\n", i, (unsigned long)v);
+            }
+        }
+        drv_hook_detach();
+        return st.captured_x0 ? 0 : 5;
+    }
     if (!strcmp(cmd, "base")) {
         if (argc < 4) return 1;
         uintptr_t b = drv_base(argv[3]);
