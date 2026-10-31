@@ -383,3 +383,121 @@ jccfindfield <pid> <fieldname>
 实测 `starLevel` 输出 7 个候选槽，并把结构打印出来（即第 14 节的分析来源）。
 
 **注意**：该工具与 `jccscan` 一致，接受 `rw-s` 映射、`cap=8192`、逐页读回退。`jccfind` / `jccread` / `jccplayer` 仍是旧规则。
+
+---
+
+## 17. `CSoGame` 已定位（112 字段）
+
+用扫描器修好后的元数据，按类名找到：
+
+```
+字符串 "CSoGame" @ 0x70c5fd27ba
+指向它的槽    @ 0x70c4d3f568
+类指针 = 槽 - 0x10 = 0x70c4d3f558
+```
+
+### 17.1 关键字段
+
+| 字段 | 偏移 | 说明 |
+|---|---|---|
+| `CurLogicFrameTime` | 0x38 | 当前逻辑帧 |
+| `UserInfoDic` | 0x40 | 用户信息字典 |
+| `PlayerPlayBookDic` | 0x60 | |
+| `_vecBuyHero` | 0x78 | 购买区英雄 |
+| `_vecWaitHero` | 0x80 | 备战席英雄 |
+| `_vecBattleGroundHero` | 0x88 | 场上英雄 |
+| `_vecHeroValueChange` | 0x90 | |
+| `_roomId` | 0xf8 | 房间号 |
+| `_battleId` | 0x100 | |
+| `_mySeatId` | 0x10c | 自己的座位 |
+| `CGameStatistics` | 0x148 | |
+| `CSoConfig` | 0x150 | |
+| `NPCManager` | 0x158 | |
+| `PlayerMgr` | 0x160 | 玩家管理器 |
+| `roundSelectCore` | 0x168 | 选秀核心 |
+| `chessBattleCore` | 0x170 | 战斗核心 |
+| `OpponentMgr` | 0x180 | 对手管理器 |
+| `ListBattleVSPlayers` | 0x198 | |
+| **`ListBattleHeroDatas`** | **0x1a0** | 战斗英雄数据 |
+| `_dicBattleField` | 0x1a8 | |
+| `gameFettersCtrl` | 0x1b8 | 羁绊控制 |
+| `HeroPool` | 0x250 | 英雄池 |
+| `UpStarCount` | 0x300 | 升星计数 |
+| `UpStarCountByQuality` | 0x308 | 按品质的升星计数 |
+| `Data` | 0x318 | |
+
+### 17.2 实例获取
+
+从任意 `CPlayer` 反查（`CPlayer.CSoGame` @0x30）：
+
+```
+CPlayer 0x6ddab81800  -> CSoGame 0x701df78540
+```
+
+注意：直接按 `klass == 0x70c4d3f558` 扫会得到 401 个命中，绝大多数是元数据表里存放的类指针，不能用来找实例。
+
+## 18. 逐单位星级：已把实体链走到底，仍未出现
+
+完整链路实测：
+
+```
+CSoGame +0x1a0  ListBattleHeroDatas  = LinkedHashMap`2
+   entries@0x10  buckets@0x18  comparer@0x20  internalCount@0x40
+   条目 0x20 字节: {hash, next, prev, 序号, 对象指针, 编号}
+   实测 4 个条目，key 值 3/4/5/6
+   -> 每个值是一个 List<T>（System.Collections.Generic.List`1）
+        _items@0x10  _size@0x18
+        实测第一条列表 _size = 11
+   -> 元素是 ZGameClient.TAC_BattleGroundHero
+        stHeroEntity       @0x10
+        stBattleGroundPos  @0x18
+        bIsRealHero        @0x20
+        bIsPartnerHero     @0x21
+        iDragonEggCfg      @0x22
+   -> stHeroEntity 是 ZGameClient.TAC_HeroEntity（只有 _iEntityID / _iHeroConfID）
+```
+
+**整条链上没有任何星级字段。**
+
+同时 `CSoGame.UpStarCount` @0x300 / `UpStarCountByQuality` @0x308 只是全局计数。
+
+### 结论
+
+逐单位的星级只可能来自两处：
+
+1. `CPlayer.HeroPromotionMgr` -> `m_mapHeroPromotionTree`（英雄->升星树的映射），但该 map 的 `entries` 落在 r--p 段，驱动读不到
+2. `CPlayer.LatestBattleHeroDic` @0x4f0：`internalCount=22`，`entries` 可读，条目含 entityID
+
+## 19. 附带确认：`starLevel` 是属性
+
+`jccfindfield <pid> starLevel` 找到 7 处引用，结构：
+
+```
++0x00  name -> "starLevel"
++0x0C  token (0x0802e640 之类)
++0x10  Il2CppType (0x70cd2c8060，int32)
++0x20  0x70d02dc620  <- libil2cpp 代码区，getter
+```
+
+所以四个已知类里都查不到 `starLevel` 字段，它是属性。
+
+## 20. 扫描器修复带来的连锁收益
+
+| 类名 | 修复前 | 修复后 |
+|---|---|---|
+| `CSoGame` | 0 命中 | **32 命中** |
+| `HeroRoot` | 0 命中 | **50 命中** |
+| `PlayerListItem` | 0 命中 | 45 命中 |
+| `CHero` | 0 命中 | 7 命中 |
+| `starLevel` | 0 命中 | 5 命中 |
+
+之前"这些类不存在"的判断全部推翻——它们一直都在，只是扫描器没覆盖元数据。
+
+**找类的通用方法**：
+
+```
+jccscan str <pid> <ClassName>          找到类名字符串地址 S
+jccscan ptr <pid> <S去掉0x>            找到指向 S 的槽
+类指针 = 槽 - 0x10
+jccfields <pid> <类指针>               打印该类全部字段
+```
