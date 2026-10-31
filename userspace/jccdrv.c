@@ -29,41 +29,43 @@ uintptr_t drv_base(const char *module)
     return mb.base;
 }
 
-/* ????????????????????????"????/???"????? 0 */
-static int range_mapped(uintptr_t addr, size_t len)
+/*
+ * ???????????????????????? /proc/<pid>/maps????????????
+ *
+ * OP_CMD_READ(601) ??????????-1???????????errno?? *   errno == ENOTTY(25)  ?????????buf ?????????
+ *   errno == EPERM(1)    ????????uf ??????
+ * ??????????? -> 25????????/?????? -> 1
+ */
+static int drv_errno_ok(int e)
 {
-    char path[64], line[256];
-    unsigned long lo, hi;
-    FILE *f;
-    int ok = 0;
+    return (e == 0 || e == 25 /* ENOTTY */);
+}
 
-    if (g_pid <= 0) return 1;
-    snprintf(path, sizeof(path), "/proc/%d/maps", g_pid);
-    f = fopen(path, "r");
-    if (!f) return 1;
-    while (fgets(line, sizeof(line), f)) {
-        if (sscanf(line, "%lx-%lx", &lo, &hi) == 2) {
-            if (addr >= (uintptr_t)lo && addr + len <= (uintptr_t)hi) { ok = 1; break; }
-        }
-    }
-    fclose(f);
-    return ok;
+int drv_read_raw(int pid, uintptr_t addr, void *buf, size_t len, int *out_errno)
+{
+    J_COPY_MEMORY c;
+    int ret;
+    if (drv_open() < 0) return -1000;
+    memset(&c, 0, sizeof(c));
+    c.pid = pid; c.addr = addr; c.buffer = buf; c.size = len;
+    errno = 0;
+    ret = ioctl(g_fd, OP_CMD_READ, &c);
+    if (out_errno) *out_errno = errno;
+    return ret;
 }
 
 int drv_read(uintptr_t addr, void *buf, size_t len)
 {
     J_COPY_MEMORY c;
-    unsigned char *p = (unsigned char *)buf;
-    size_t i, same = 0;
+    int e = 0;
 
     if (drv_open() < 0 || g_pid <= 0) return -1;
-    if (!range_mapped(addr, len)) return -1;      /* ????????????? */
     memset(&c, 0, sizeof(c));
     c.pid = g_pid; c.addr = addr; c.buffer = buf; c.size = len;
-    memset(buf, 0xCC, len);
-    ioctl(g_fd, OP_CMD_READ, &c);                 /* ?????????? */
-    for (i = 0; i < len; i++) if (p[i] == 0xCC) same++;
-    return (same == len) ? -1 : 0;
+    errno = 0;
+    ioctl(g_fd, OP_CMD_READ, &c);
+    e = errno;
+    return drv_errno_ok(e) ? 0 : -1;
 }
 
 int drv_write(uintptr_t addr, const void *buf, size_t len)
@@ -78,9 +80,8 @@ int drv_write(uintptr_t addr, const void *buf, size_t len)
 
 int drv_read32(uintptr_t addr, uint32_t *out)
 {
-    uint32_t sentinel = 0xCDCDCDCDu, v = sentinel;
-    drv_read(addr, &v, 4);
-    if (v == sentinel) return -1;
+    uint32_t v = 0;
+    if (drv_read(addr, &v, 4) != 0) return -1;
     *out = v;
     return 0;
 }
@@ -167,6 +168,8 @@ int drv_hook_set_rot(uint32_t mode, const uint32_t *stack, uint32_t n)
     }
     return ioctl(g_fd, 0x266 /* placeholder */, 0), ioctl(g_fd, 617, &cfg);
 }
+
+int drv_unhook(void) { return (drv_open() < 0) ? -1 : ioctl(g_fd, 606, 0); }
 
 int drv_hook_detach(void) { return (drv_open() < 0) ? -1 : ioctl(g_fd, OP_CMD_HOOK_DETACH, 0); }
 

@@ -4,6 +4,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <time.h>
 
 static long hx(const char *s) { return strtol(s, NULL, 16); }
@@ -75,6 +78,112 @@ static uintptr_t resolve_sym(uintptr_t base, const char *sym, int verbose)
     free(strs); free(symbuf);
     return found;
 }
+static uint64_t va2off(unsigned char *img, uint64_t va)
+{
+    uint64_t phoff; unsigned short phentsize, phnum; int i;
+    memcpy(&phoff, img + 0x20, 8);
+    memcpy(&phentsize, img + 0x36, 2);
+    memcpy(&phnum, img + 0x38, 2);
+    for (i = 0; i < phnum; i++) {
+        unsigned char *pp = img + phoff + (uint64_t)i * phentsize;
+        uint32_t type; uint64_t off, vaddr, filesz;
+        memcpy(&type, pp, 4);
+        memcpy(&off, pp + 8, 8);
+        memcpy(&vaddr, pp + 16, 8);
+        memcpy(&filesz, pp + 32, 8);
+        if (type == 1 && va >= vaddr && va < vaddr + filesz)
+            return off + (va - vaddr);
+    }
+    return 0;
+}
+
+static uintptr_t sym_from_file(const char *path, const char *sym, int verbose)
+{
+    int fd, i, n;
+    struct stat st;
+    unsigned char *img;
+    uint64_t phoff, dynoff = 0, symva = 0, strva = 0, strsz = 0, syment = 24;
+    unsigned short phentsize, phnum;
+    uintptr_t result = 0;
+    unsigned char *strs, *symtab;
+    uint64_t symoff, stroff;
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) { printf("open %s failed\n", path); return 0; }
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return 0; }
+    img = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (img == MAP_FAILED) { close(fd); printf("mmap failed\n"); return 0; }
+
+    if (memcmp(img, "\x7f" "ELF", 4) != 0) { printf("not ELF\n"); goto out; }
+    memcpy(&phoff, img + 0x20, 8);
+    memcpy(&phentsize, img + 0x36, 2);
+    memcpy(&phnum, img + 0x38, 2);
+    for (i = 0; i < phnum; i++) {
+        unsigned char *pp = img + phoff + (uint64_t)i * phentsize;
+        uint32_t type; uint64_t vaddr;
+        memcpy(&type, pp, 4);
+        memcpy(&vaddr, pp + 16, 8);
+        if (type == 2) { dynoff = va2off(img, vaddr); break; }
+    }
+    if (!dynoff) { printf("no PT_DYNAMIC\n"); goto out; }
+    for (n = 0; n < 256; n++) {
+        uint64_t tag, val;
+        memcpy(&tag, img + dynoff + (uint64_t)n * 16, 8);
+        memcpy(&val, img + dynoff + (uint64_t)n * 16 + 8, 8);
+        if (tag == 0) break;
+        if (tag == 6)  symva = val;
+        if (tag == 5)  strva = val;
+        if (tag == 10) strsz = val;
+        if (tag == 11) syment = val;
+    }
+    if (!symva || !strva || !strsz) { printf("dyn tags missing\n"); goto out; }
+    symoff = va2off(img, symva);
+    stroff = va2off(img, strva);
+    if (!symoff || !stroff) { printf("va2off failed\n"); goto out; }
+    if (verbose) printf("file: SYMTAB@0x%lx STRTAB@0x%lx STRSZ=%lu\n",
+        (unsigned long)symoff, (unsigned long)stroff, (unsigned long)strsz);
+    strs = img + stroff;
+    symtab = img + symoff;
+    if (syment != 24) syment = 24;
+    for (n = 0; n < 400000; n++) {
+        unsigned char *e = symtab + (uint64_t)n * syment;
+        uint32_t nmoff; unsigned char info; uint64_t val;
+        if ((unsigned char *)e + 24 > img + st.st_size) break;
+        memcpy(&nmoff, e, 4);
+        memcpy(&info, e + 4, 1);
+        memcpy(&val, e + 8, 8);
+        if (!nmoff || nmoff >= strsz) continue;
+        if ((info & 0xf) != 2) continue;
+        if (!strcmp((char *)strs + nmoff, sym)) { result = (uintptr_t)val; break; }
+    }
+out:
+    munmap(img, (size_t)st.st_size);
+    close(fd);
+    return result;
+}
+
+static uintptr_t module_path_base(int pid, const char *mod, char *out, size_t outlen)
+{
+    char mpath[64], line[1024];
+    FILE *f; uintptr_t base = 0;
+    out[0] = 0;
+    snprintf(mpath, sizeof(mpath), "/proc/%d/maps", pid);
+    f = fopen(mpath, "r");
+    if (!f) return 0;
+    while (fgets(line, sizeof(line), f)) {
+        char *sp;
+        unsigned long lo = 0;
+        if (!strstr(line, mod)) continue;
+        if (sscanf(line, "%lx-", &lo) != 1) continue;
+        base = (uintptr_t)lo;
+        sp = strchr(line, '/');
+        if (sp) { strncpy(out, sp, outlen - 1); out[outlen - 1] = 0; out[strcspn(out, "\n")] = 0; }
+        break;
+    }
+    fclose(f);
+    return base;
+}
+
 static uintptr_t follow_veneer(uintptr_t a)
 {
     uint32_t insn = 0;
@@ -126,6 +235,44 @@ int main(int argc, char **argv)
 
     int pid = atoi(argv[2]);
     if (drv_attach(pid) != 0) { printf("attach %d failed\n", pid); return 2; }
+
+    if (!strcmp(cmd, "symf")) {
+        char path[256];
+        uintptr_t base, rva, addr;
+        if (argc < 5) { printf("usage: jccd symf <pid> <module> <symbol> [veneer]\n"); return 1; }
+        base = module_path_base(pid, argv[3], path, sizeof(path));
+        printf("module=%s base=0x%lx\npath=%s\n", argv[3], (unsigned long)base, path);
+        if (!base || !path[0]) return 3;
+        rva = sym_from_file(path, argv[4], 1);
+        if (!rva) { printf("symbol %s not found\n", argv[4]); return 4; }
+        addr = base + rva;
+        printf("sym %s = 0x%lx (rva 0x%lx)\n", argv[4], (unsigned long)addr, (unsigned long)rva);
+        if (argc > 5 && !strcmp(argv[5], "veneer")) {
+            uintptr_t r = follow_veneer(addr);
+            printf("  veneer -> 0x%lx\n", (unsigned long)r);
+        }
+        return 0;
+    }
+
+    if (!strcmp(cmd, "rawread")) {
+        uintptr_t a = (uintptr_t)hx(argv[3]);
+        long len = (argc > 4) ? strtol(argv[4], NULL, 0) : 16;
+        unsigned char buf[256];
+        int e = 0, ret, k;
+        if (len <= 0 || len > 256) len = 16;
+        memset(buf, 0xCC, sizeof(buf));
+        ret = drv_read_raw(pid, a, buf, (size_t)len, &e);
+        printf("ioctl(601) ret=%d errno=%d  ? 8 ??=", ret, e);
+        for (k = 0; k < 8 && k < len; k++) printf("%02x ", buf[k]);
+        printf("\n");
+        return 0;
+    }
+
+    if (!strcmp(cmd, "unhook")) {
+        printf("detach rc=%d\n", drv_hook_detach());
+        printf("unhook(606) rc=%d\n", drv_unhook());
+        return 0;
+    }
 
     if (!strcmp(cmd, "regs")) {
         uintptr_t a = (uintptr_t)hx(argv[3]);

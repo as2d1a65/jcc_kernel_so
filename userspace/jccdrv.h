@@ -41,6 +41,7 @@ typedef struct {
 } J_HOOK_SET_ROT;
 int drv_hook_set_rot(uint32_t mode, const uint32_t *stack, uint32_t n);
 int drv_hook_detach(void);
+int drv_unhook(void);
 #define OP_CMD_TOUCH_INIT    626
 #define OP_CMD_TOUCH_EVENT   627
 #define OP_CMD_TOUCH_DESTROY 628
@@ -70,6 +71,7 @@ int  drv_open(void);
 int  drv_attach(int pid);
 uintptr_t drv_base(const char *module);
 int  drv_read(uintptr_t addr, void *buf, size_t len);
+int  drv_read_raw(int pid, uintptr_t addr, void *buf, size_t len, int *out_errno);
 int  drv_write(uintptr_t addr, const void *buf, size_t len);
 int  drv_read32(uintptr_t addr, uint32_t *out);
 int  drv_write32(uintptr_t addr, uint32_t v);
