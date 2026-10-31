@@ -12,6 +12,8 @@ jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 >
 > 游戏内存结构图（类、字段偏移、读取方法）见 [`docs/memory-map.md`](docs/memory-map.md)。
 >
+> 棋盘读取链路见 [`docs/board-reading.md`](docs/board-reading.md)。
+>
 > 第三方内核驱动（RT-hook）及其 ABI 说明见 [`driver/README.md`](driver/README.md)。
 
 ---
