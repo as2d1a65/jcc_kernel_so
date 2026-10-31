@@ -32,7 +32,21 @@
 
 static const int CARD_X[5] = {573, 1059, 1545, 2031, 2517};
 
-static int g_use_drv = 0;
+static int g_use_drv = 1;
+static int g_toggle = 0;
+
+/* Screen (2780x1264 landscape) -> raw uinput coordinates.
+ * Verified on device: virtual touchscreen raw range is 20224 x 44480
+ * (= 1264*16, 2780*16) and the display viewport applies ROT_270, so
+ *   raw_x = 16 * (1264 - screen_y)
+ *   raw_y = 16 * screen_x
+ * Confirmed by buying a shop card: gold -1 and the slot emptied. */
+#define SCREEN_W 2780
+#define SCREEN_H 1264
+#define RAW_X_MAX 20224
+#define RAW_Y_MAX 44480
+
+static void tap(int x, int y);
 
 static int i32(uintptr_t a) { int v = 0; drv_read(a, &v, 4); return v; }
 static unsigned long u64v(uintptr_t a) { unsigned long v = 0; drv_read(a, &v, 8); return v; }
@@ -48,11 +62,13 @@ static void msleep(int ms)
 static void tap(int x, int y)
 {
     if (g_use_drv) {
-        drv_touch(J_TOUCH_DOWN, (uint32_t)x, (uint32_t)y, 1);
+        uint32_t rx = (uint32_t)(16 * (SCREEN_H - y));
+        uint32_t ry = (uint32_t)(16 * x);
+        drv_touch(J_TOUCH_DOWN, rx, ry, 1);
         msleep(60);
-        drv_touch(J_TOUCH_MOVE, (uint32_t)x, (uint32_t)y, 1);
+        drv_touch(J_TOUCH_MOVE, rx, ry, 1);
         msleep(30);
-        drv_touch(J_TOUCH_UP, (uint32_t)x, (uint32_t)y, 1);
+        drv_touch(J_TOUCH_UP, rx, ry, 1);
     } else {
         char cmd[128];
         snprintf(cmd, sizeof(cmd), "input tap %d %d", x, y);
@@ -77,7 +93,7 @@ static int cost_of(int b)
     return 5;
 }
 
-struct card { int hid, base, cost; };
+struct card { int hid, base, cost, pos; };
 
 static int read_shop(unsigned long cp, struct card *out)
 {
@@ -105,6 +121,7 @@ static int read_shop(unsigned long cp, struct card *out)
         out[n].hid = hid;
         out[n].base = normalize(hid);
         out[n].cost = cost_of(out[n].base);
+        out[n].pos = i32((uintptr_t)hero + 0x1c);
         n++;
     }
     return n;
@@ -139,9 +156,12 @@ int main(int argc, char **argv)
     if (!strcmp(argv[2], "--tap")) {
         int mx = (argc > 5) ? atoi(argv[5]) : 2780;
         int my = (argc > 6) ? atoi(argv[6]) : 1264;
+        if (argc > 7 && !strcmp(argv[7], "drv")) g_use_drv = 1;
         if (drv_attach(pid) != 0) { printf("attach failed\n"); return 2; }
         if (mx) drv_touch_init(mx, my);
+        msleep(1500);              /* let InputReader finish adding the device */
         tap(atoi(argv[3]), atoi(argv[4]));
+        msleep(400);
         if (mx) drv_touch_destroy();
         printf("tapped (%s,%s) drv=%d\n", argv[3], argv[4], g_use_drv);
         return 0;
@@ -151,6 +171,7 @@ int main(int argc, char **argv)
     for (i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--dry")) { dry = 1; continue; }
         if (!strcmp(argv[i], "--drv")) { g_use_drv = 1; continue; }
+        if (!strcmp(argv[i], "--toggle")) { g_toggle = 1; continue; }
         if (!strcmp(argv[i], "--reserve")) { reserve = atoi(argv[++i]); continue; }
         if (!strcmp(argv[i], "--maxrolls")) { maxrolls = atoi(argv[++i]); continue; }
         if (!strcmp(argv[i], "--maxbuy")) { maxbuy = atoi(argv[++i]); continue; }
@@ -158,11 +179,36 @@ int main(int argc, char **argv)
     }
     if (ntarget == 0) { printf("no targets\n"); return 1; }
     if (drv_attach(pid) != 0) { printf("attach failed\n"); return 2; }
+    if (g_use_drv) {
+        int rc = drv_touch_init(RAW_X_MAX, RAW_Y_MAX);
+        printf("touch_init(%d,%d) rc=%d\n", RAW_X_MAX, RAW_Y_MAX, rc);
+        msleep(1200);
+    }
 
     printf("targets:");
     for (k = 0; k < ntarget; k++) printf(" %d", targets[k]);
     printf("  dry=%d reserve=%d maxrolls=%d maxbuy=%d drv=%d\n\n",
            dry, reserve, maxrolls, maxbuy, g_use_drv);
+
+    /* The shop open/closed state lives only in the Unity UI layer and is not
+     * readable from il2cpp memory (verified: toggling changes no byte in
+     * CSoGame[0..0x340] nor CPlayer[0..0x540]).  Probe it instead: toggle,
+     * try a refresh, and if the shop did not change, toggle back and retry. */
+    if (g_toggle) {
+        int gold, tries, ok = 0;
+        long s0, s1;
+        for (tries = 0; tries < 2 && !ok; tries++) {
+            printf("ensure-open: toggle%s\n", tries ? " (retry)" : "");
+            tap(2595, 1130);
+            msleep(500);
+            s0 = signature(cp, &gold);
+            tap(REFRESH_X, REFRESH_Y);
+            msleep(700);
+            s1 = signature(cp, &gold);
+            if (s1 != s0) { ok = 1; }
+        }
+        printf("ensure-open: %s\n\n", ok ? "shop is open" : "could not confirm");
+    }
 
     for (;;) {
         struct card c[5];
@@ -182,10 +228,13 @@ int main(int argc, char **argv)
                 if (c[i].base == targets[kk] && gold >= c[i].cost) { best = i; break; }
 
         if (best >= 0) {
-            printf("  -> BUY slot %d (base %d cost %d) at (%d,%d)\n",
-                   best, c[best].base, c[best].cost, CARD_X[best], CARD_Y);
-            if (dry) break;
-            tap(CARD_X[best], CARD_Y);
+            {
+                int cx = CARD_X[(c[best].pos >= 0 && c[best].pos < 5) ? c[best].pos : best];
+                printf("  -> BUY pos %d (base %d cost %d) at (%d,%d)\n",
+                       c[best].pos, c[best].base, c[best].cost, cx, CARD_Y);
+                if (dry) break;
+                tap(cx, CARD_Y);
+            }
         } else {
             if (gold - 2 < reserve) { printf("  -> stop: gold %d < reserve %d + 2\n", gold, reserve); break; }
             if (rolls >= maxrolls) { printf("  -> stop: maxrolls %d reached\n", maxrolls); break; }
