@@ -211,6 +211,19 @@ int main(int argc, char **argv)
     }
     if (drv_attach(pid) != 0) { printf("attach failed\n"); return 2; }
 
+    if (!strcmp(argv[3], "auto")) {
+        struct pl ps0[MAXP];
+        int n0 = find_players(pid, klass, ps0, MAXP), j2, seat0 = -1;
+        cp = 0;
+        for (j2 = 0; j2 < n0 && !cp; j2++) {
+            unsigned long game = u64v((uintptr_t)ps0[j2].cp + 0x30);
+            if (!game) continue;
+            if (seat0 < 0) seat0 = i32((uintptr_t)game + 0x10c);
+            if (ps0[j2].chair == seat0) cp = ps0[j2].cp;
+        }
+        if (!cp) { printf("auto: no match / no seat found (players=%d)\n", n0); return 5; }
+    }
+
     for (;;) {
         struct pl ps[MAXP];
         struct node nodes[MAXN];
@@ -225,15 +238,15 @@ int main(int argc, char **argv)
         game = u64v((uintptr_t)cp + 0x30);
         if (game) seat = i32((uintptr_t)game + 0x10c);
 
-        printf("\n==================== JCC DASH ====================\n");
-        printf("my seat %d   level %d   gold %d\n\n", seat, level, gold);
+        printf("== JCC ==\n");
+        printf("seat %d  L%d  G%d\n", seat, level, gold);
 
         /* players */
-        printf(" chair  AI  rank  hp   lv  gold  人口\n");
-        printf("--------------------------------------\n");
+        printf("c  AI rk hp lv g pop\n");
+        printf("---------------------\n");
         for (i = 0; i < np; i++) {
             int mine = (ps[i].chair == seat);
-            printf("%s%-5d  %-2d  %-4d  %-3d  %-2d  %-4d  %d\n",
+            printf("%s%-2d %-2d %-2d %-3d %-2d %-3d %d\n",
                    mine ? ">" : " ",
                    ps[i].chair, ps[i].ai, ps[i].rank, ps[i].hp,
                    ps[i].lv, ps[i].gold, ps[i].board);
@@ -252,10 +265,10 @@ int main(int argc, char **argv)
             for (k = 0; k < nt; k++)
                 if (nodes[i].hid == targets[k]) { cntTgt[k] = nodes[i].cnt; iniTgt[k] = nodes[i].ini; }
 
-        printf("\n等级权重: ");
-        for (c = 1; c <= 5; c++) printf("%d费=%d%% ", c, odds[c]);
-        printf("\n\n 费 英雄ID   剩余/初始  被拿  权重   命中%%\n");
-        printf("----------------------------------------------\n");
+        printf("\nODDS ");
+        for (c = 1; c <= 5; c++) printf("%d:%d ", c, odds[c]);
+        printf("\nH LEFT/IN TAKEN W HIT%%\n");
+        printf("---------------------\n");
         for (c = 1; c <= 5; c++) {
             for (i = 0; i < nn; i++) {
                 double p;
@@ -269,10 +282,10 @@ int main(int argc, char **argv)
                 }
                 if (nodes[i].hid >= 31400) star = 3;
                 else if (nodes[i].hid >= 21400) star = 2;
-                printf(" %d  %-7d  %2d/%-2d     %2d   %-4d  %5.2f%s\n",
+                printf("%d %-6d %2d/%-2d %2d %-3d %5.2f%s\n",
                        c, nodes[i].hid, nodes[i].cnt, nodes[i].ini,
                        nodes[i].ini - nodes[i].cnt, nodes[i].w, p * 100.0,
-                       nodes[i].cnt == 0 ? "  (空)" : "");
+                       nodes[i].cnt == 0 ? "  (??" : "");
                 (void)star;
             }
         }
@@ -283,16 +296,16 @@ int main(int argc, char **argv)
             for (c = 1; c <= 5; c++)
                 if (odds[c] > 0 && wAll[c] > 0 && wTgt[c] > 0)
                     p += (odds[c] / 100.0) * (wTgt[c] / (double)wAll[c]);
-            printf("\n>>> 目标:");
-            for (k = 0; k < nt; k++) printf(" %d(%d/%d)", targets[k], cntTgt[k], iniTgt[k]);
-            printf("\n    整店命中率 %.2f%%", (1.0 - pow(1.0 - p, 5.0)) * 100.0);
+            printf("\nTGT");
+            for (k = 0; k < nt; k++) printf(" %d:%d/%d", targets[k], cntTgt[k], iniTgt[k]);
+            printf(" hit %.2f%%", (1.0 - pow(1.0 - p, 5.0)) * 100.0);
             if (p > 0) {
                 double need = log(0.2) / log(1.0 - (1.0 - pow(1.0 - p, 5.0)));
-                printf("   80%%把握需 %.0f 次刷新 (%.0f 金)", ceil(need), ceil(need) * 2);
+                printf("  80pc=%.0f rolls %.0fg", ceil(need), ceil(need) * 2);
             }
             printf("\n");
         }
-        printf("==================================================\n");
+        printf("=====\n");
 
         if (!loop) break;
         msleep(loop);
