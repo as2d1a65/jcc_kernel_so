@@ -105,8 +105,9 @@ int main(int argc, char **argv)
     buf = malloc(CHUNK);
     if (!buf) return 2;
 
-    printf(" %-5s %-3s %-5s %-4s %-3s %-5s %-5s %-14s %s\n",
-           "chair", "AI", "rank", "hp", "lv", "exp", "gold", "CPlayer", "board");
+    printf(" %-5s %-3s %-5s %-5s %-5s %-5s %-5s %-14s %s\n",
+           "chair", "AI", "rank", "hp", "lv", "F398", "gold", "CPlayer", "board");
+    printf(" (hp=0x38c lv=0x390 gold=0x39c verified; F398 still unknown)\n");
 
     for (i = 0; i < nreg; i++) {
         unsigned long a;
@@ -141,7 +142,7 @@ int main(int argc, char **argv)
                 if (hp < 0 || hp > 100) continue;
                 if (lv < 1 || lv > 10) continue;
                 if (ownklass < 0x7000000000UL || ownklass > 0x7100000000UL) continue;
-                printf(" %-5d %-3d %-5d %-4d %-3d %-5d %-5d 0x%-12lx board=0x%lx\n",
+                printf(" %-5d %-3d %-5d %-5d %-5d %-5d %-5d 0x%-12lx board=0x%lx\n",
                        ch, u8((uintptr_t)cp + 0x280), rk, hp, lv,
                        i32((uintptr_t)cp + 0x398), i32((uintptr_t)cp + 0x39c),
                        cp, u64v((uintptr_t)cp + 0x3c0));
