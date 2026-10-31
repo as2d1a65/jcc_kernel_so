@@ -38,7 +38,7 @@ int main(int argc, char **argv)
     if (!items || size > 32) { printf("unexpected list shape\n"); return 3; }
     n = (int)size;
 
-    printf(" idx  pos      entity        heroConfID   entityID\n");
+    printf(" idx  pos      entity        heroConfID star base      entityID\n");
     for (i = 0; i < n; i++) {
         unsigned long slot = items + 0x20 + (unsigned long)i * 8;
         unsigned long elem, ent;
@@ -52,7 +52,14 @@ int main(int argc, char **argv)
         if (!ent) continue;
         hid = i32((uintptr_t)ent + 0x14);
         eid = i32((uintptr_t)ent + 0x10);
-        printf(" %-4d (%d,%d)   0x%-12lx %-12d 0x%x\n", i, x, y, ent, hid, eid);
+        {
+            int star, base;
+            if (hid >= 31400)      { star = 3; base = hid - 20000; }
+            else if (hid >= 21400) { star = 2; base = hid - 10000; }
+            else                   { star = 1; base = hid; }
+            printf(" %-4d (%d,%d)   0x%-12lx %-6d %dstar  base=%-6d 0x%x\n",
+                   i, x, y, ent, hid, star, base, eid);
+        }
     }
     return 0;
 }
