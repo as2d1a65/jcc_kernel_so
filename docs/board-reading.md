@@ -602,3 +602,75 @@ m_mapHeroStar : 星级(>=2) -> 该星级的单位数量
 - 星级变化时 `m_mapHeroStar` 的 value 会变 → **可检测升星事件**
 
 不能做的：判断"具体哪一个棋子是几星"（例如自动决定卖哪个）。
+
+---
+
+## 26. 战斗逻辑层类（新发现）
+
+`TAC_` 前缀的类全是客户端显示/观战数据。真正的战斗模拟数据在 **`ChessBattle*`** 系列：
+
+```
+CPlayer.m_logicPlayer @0x200 -> .ChessBattleLogicPlayer
+   <ChairId>            @0x110
+   m_battleField        @0x118
+   m_battleLogicField   @0x120 -> .ChessBattleLogicField
+   m_battleLogicUnitId  @0x128 -> LinkedHashMap`2
+   m_waitLogicUnitId    @0x130 -> LinkedHashMap`2
+   m_heroPromotionList  @0x138 -> List<T>
+   m_maxFrame @0x140  m_nowFrame @0x144  m_currentId @0x148
+   m_logicPlayerData    @0x1d0 -> .ChessBattleLogicPlayerData
+        m_cplayer @0x28  m_observerModel @0x30  m_attackData @0x48
+   m_equipMgr           @0x1f8
+```
+
+实测备战期：`m_battleLogicUnitId.entries = 0`、`m_heroPromotionList._size = 0` —— **全是战斗期缓存**。
+
+## 27. `starLevel` 后备字段解析（方法已跑通）
+
+用「字段名 → FieldInfo → parent+offset」的路径成功解析：
+
+```
+m_starLevel  -> parent = 0x70b19e0f30 = .WarehouseDetailStarListItem   offset = 0x294
+```
+
+FieldInfo 布局再次确认：`name@+0x00, type@+0x08, parent@+0x10, offset@+0x18`。
+
+同类解析结果（均为 UI 层，非棋盘单位）：
+
+| 字段名 | 所属类 | 偏移 |
+|---|---|---|
+| `m_starLevel` | `WarehouseDetailStarListItem` | 0x294 |
+| `m_HeroStarThreeEntity` | `AITreeNode_ChooseSellChessV2` | 0x68 |
+| `m_star` | `RookieDeckDockViewItem` | 0xe4 |
+| `m_star` | `TinyUnlockStarItem` | 0x78 |
+| `m_HeroStarTextureNameCache` | `ChessHeroMaterialResPool` | 0x10 |
+
+**`AITreeNode_ChooseSellChessV2` 值得注意**：这是游戏自己的 AI「选择卖哪个棋子」节点，字段全是 `m_SellHero` / `m_NoTypeHero_Wait` / `m_LineUpHero_Battle` / `m_HeroStarThreeEntity` 之类——证明游戏 AI 确实在做星级判断，但数据来源不在这张表里。
+
+## 28. 为什么 APK 能拿到、我们拿不到（机制层面）
+
+| | libdemo.so | 本项目 |
+|---|---|---|
+| 手段 | inline hook `HeroRoot_SetData` | 无 hook |
+| 取法 | 在函数被调用时读**参数寄存器** | 只能读内存 |
+| 需要星级被存下来吗 | **不需要**，值在调用瞬间就在寄存器里 | **需要**，必须存在于某处 |
+
+`starLevel` 是**属性**（getter `0x70d02dc620`），说明它是**运行时计算**出来的，不是持久化字段。所以"内存里找不到"是合理的——它可能压根没存。
+
+### 由此推出的新假设
+
+TFT 类游戏的星级是**派生值**：拥有 3 个同英雄 → 2 星，9 个 → 3 星。若游戏采用此模型，则它只需要存「每个英雄的拥有数量」，星级按数量算：
+
+```
+1~2 个 -> 1 星
+3~8 个 -> 2 星
+9+  个 -> 3 星
+```
+
+旁证：
+
+1. `starLevel` 是属性，是算出来的
+2. `m_mapHeroStar` 只缓存**聚合结果**（星级→数量），正符合"原始数据是数量、星级是派生"的设计
+3. 早前在对局中实测到形如 `{数量, 英雄ID}` 的相邻整数对：`{0,0x3802} {10,0x3802} {1,0x3801} {6,0x3801}` —— 其中的 10 / 6 / 1 很像拥有数量
+
+**下一步**：找"每英雄拥有数量"的可读容器，自己按数量算星级，效果等价于读星级，且不需要 hook。
