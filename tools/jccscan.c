@@ -26,7 +26,7 @@ static int load_regions(int pid, struct region **out)
 {
     char p[64], line[1024];
     FILE *f;
-    int n = 0, cap = 1024;
+    int n = 0, cap = 8192;
     struct region *r = calloc((size_t)cap, sizeof(*r));
 
     snprintf(p, sizeof(p), "/proc/%d/maps", pid);
@@ -51,7 +51,7 @@ static int skippable(const struct region *r)
 {
     if (r->perms[0] != 'r') return 1;
     if (r->perms[2] == 'x') return 0;
-    if (r->perms[1] != '-') return 0;
+    if (r->perms[1] == 'w') return 0;   /* rw- ? rw-s ??????? rw-s */
     if (r->path[0] == 0) return 0;
     return 1;
 }
@@ -163,7 +163,14 @@ int main(int argc, char **argv)
         for (a = regs[i].lo; a < regs[i].hi; a += CHUNK) {
             size_t want = (size_t)((regs[i].hi - a) < CHUNK ? (regs[i].hi - a) : CHUNK);
             size_t k;
-            if (drv_read((uintptr_t)a, buf, want) != 0) continue;
+            if (drv_read((uintptr_t)a, buf, want) != 0) {
+                size_t pg;
+                for (pg = 0; pg < want; pg += 4096) {
+                    size_t pn = (want - pg > 4096) ? 4096 : (want - pg);
+                    if (drv_read((uintptr_t)(a + pg), buf + pg, pn) != 0)
+                        memset(buf + pg, 0xCD, pn);
+                }
+            }
             scanned += want;
             if (!strcmp(mode, "str")) {
                 for (k = 0; k + nlen <= want; k++) {

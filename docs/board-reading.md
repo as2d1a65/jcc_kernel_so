@@ -222,3 +222,89 @@ tools/diffsnap.py <A.bin> <B.bin>    两份快照逐字段比对（int/float 双
 ```
 
 用途：合成/买卖前后各拍一次，diff 出变化的字段。
+
+---
+
+## 12. 重大修正：扫描器漏了元数据区（已修）
+
+### 12.1 问题
+
+`jccscan` 扫描量长期卡在 ~1400 MB，类名/字段名永远 0 命中。三个叠加的 bug：
+
+| # | 问题 | 后果 |
+|---|---|---|
+| 1 | 过滤规则只接受 `rw-`，把 `rw-s` 跳过 | **元数据就在 `rw-s` 里，整块被漏掉** |
+| 2 | 区域上限 `cap = 1024` | 游戏映射数超过 1024，后面的区被截断 |
+| 3 | 1MB 块读失败就整块跳过，无逐页回退 | 有非驻留页的区被整块丢弃 |
+
+### 12.2 元数据在哪里
+
+```
+70c5a00000-70c9ceb000 rw-s 00000000 00:01 867535    /dev/zero (deleted)
+```
+
+68.6 MB 的 `/dev/zero` 共享可写映射 —— **这就是解密后的 `global-metadata.dat`**。游戏把加密的 metadata 解密后放在这里，所有类名、字段名、方法名都是明文。
+
+类名示例：`0x70c628eff3` → `"CPlayerGameStatistics"`；`0x70c5e23d1d` → `"starLevel"`。
+
+### 12.3 修复后的效果
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 扫描覆盖 | ~1400 MB | **4472 MB** |
+| `CPlayerGameSt` | 0 命中 | 6 命中 |
+| **`starLevel`** | **0 命中** | **5 命中** |
+| `UnityEngine` | 260 命中 | 260 命中 |
+
+### 12.4 由此确认的事实
+
+**`starLevel` 确实是这个游戏的字段名**（元数据里有 5 处），只是不属于我们已定位的 4 个类：
+
+| 类 | 有 star 字段吗 |
+|---|---|
+| `Z_PVE.CPlayer`（204 字段） | 无 |
+| `Z_PVE.CPlayerGameStatistics`（204 字段） | 无 |
+| `ZGameClient.TAC_HeroEntity`（2 字段） | 无 |
+| `Z_PVE.TAC_BattleHeroPos`（3 字段） | 无 |
+
+### 12.5 下一个明确入口
+
+`CPlayerGameStatistics` 有个字段一直没查：
+
+```
+m_mapHeroStar    @0x1a0    LinkedHashMap`2
+```
+
+实测（stats 实例 = CPlayer - 0x800）：
+
+```
+map   = 0x6ddab83a80
+  +0x10 entries        = 0x6ddad7f0e0
+  +0x18 buckets        = 0x6fdcc34360
+  +0x20 comparer       = 0x712317b620
+  +0x40 internalCount  = 1
+  +0x44 version        = 4
+  +0x50 headIndex      = 0
+  +0x54 tailIndex      = 0
+
+entries 数组:
+  +0x00 klass = 0x7089d78e30
+  +0x18 max_length = 3
+  元素区从 +0x20 起，实测内容:
+    0x6ddad7f100: 02 00 00 00  ff ff ff ff  ff ff ff ff  ff ff ff ff
+    0x6ddad7f110: 02 00 00 00  04 00 00 00  00 00 00 00  00 00 00 00
+```
+
+按 0x20 字节/条解读：`{hashCode=2, next=-1, prev=-1, key=2, value=4}`。
+`internalCount=1` 说明只有一个条目。**key 和 value 的语义需要再确认**（可能是 星级→数量，也可能是 英雄ID→星级，但 key=2 不像 heroConfID）。
+
+### 12.6 工具修正清单
+
+```
+jccscan 修复三处：
+  - 接受 rw-s 共享映射
+  - cap 1024 -> 8192
+  - 增加逐页(4KB)读回退，失败页填 0xCD
+```
+
+`jccfind` / `jccread` / `jccplayer` 仍用旧过滤规则，若需要扫元数据要同步修改。
