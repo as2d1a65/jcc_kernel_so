@@ -536,3 +536,69 @@ chair 1: 2星 4 个
 理由：`vecBattleHeroPos` 已能读出每个单位的 `{坐标, entityID, heroConfID, 实体地址}`，同一格子的实体地址在对局内稳定，两次 dump 同一地址即可隔离出星级字段，不需要遍历任何容器。
 
 这是目前唯一能绕开"容器为空/读不到"的方法。
+
+---
+
+## 23. `m_mapHeroStar` 已用真机对照验证
+
+新对局实测（用户声明"棋盘左上角那个格子是两星的"）：
+
+```
+座位判定：只有 chair 5 的单位在 (0,3)（左上角）
+  chair5 board = (1,3)h15287  (0,3)h21408  (0,0)h13320
+
+chair5 stats = CPlayer - 0x800 = 0x7048e0b000
+m_mapHeroStar @ stats+0x1a0 = 0x7048d43230
+  internalCount = 1
+  entries 数组 max_length = 3
+  entry0 = { hash=2, next=-1, prev=-1, reserved=-1, key=2, value=1 }
+         = { 星级=2 -> 数量=1 }
+```
+
+**与用户声明完全一致。** 至此 `m_mapHeroStar` 语义确证：
+
+```
+m_mapHeroStar : 星级(>=2) -> 该星级的单位数量
+```
+
+## 24. 逐单位星级：结论
+
+同一个 2 星单位（hero 21408 @ (0,3)）的实体与两个 1 星单位的实体**逐字节对比**：
+
+| 单位 | 实体地址 | +0x18 | +0x1C |
+|---|---|---|---|
+| (1,3) hero 15287 | 0x6da40d7cc0 | 0 | 19 |
+| **(0,3) hero 21408（2星）** | **0x6d8c018d40** | **0** | **0** |
+| (0,0) hero 13320 | 0x7078ce44a0 | 0 | 0 |
+
+`TAC_HeroEntity` 的 0x20 字节全部字段已穷举：`{klass, 0, entityID, heroConfID, +0x18, +0x1C}`，**没有星级**。
+
+补充搜索全部落空：
+
+- `{2, 21408}` 相邻 int32（两种字节序）→ 0 命中
+- `{21408, 0}` 的 8 字节（带 4 字节填充）→ 0 命中
+- `{星级2, 任意英雄ID}` 值域扫描 → 命中全是 arm64 代码字节
+- `m_iPlayerLife` 等 CPlayer 字段与星级无关
+
+**结论：逐单位的星级不在任何可读的实体/容器里。** 它由 `starLevel` 属性在运行时计算，属性 getter 地址为 `0x70d02dc620`（`jccfindfield` 实测），而 `libil2cpp` 代码段的 PTE 钩子不可用（HANDOFF 4.5.2），因此拿不到返回值。
+
+## 25. 当前可用能力清单
+
+| 能力 | 状态 | 入口 |
+|---|---|---|
+| 8 名玩家血量/等级/经验/金币/名次/座位/AI | 可用 | `CPlayerGameStatistics` + `m_stOwner` |
+| 每名玩家的棋盘（坐标 + 英雄ID + entityID） | 可用 | `CPlayer+0x3c0 vecBattleHeroPos` |
+| **每名玩家的星级分布（2星几个、3星几个）** | **可用，已验证** | `CPlayerGameStatistics+0x1a0 m_mapHeroStar` |
+| 游戏根对象 CSoGame（112 字段） | 可用 | `CPlayer+0x30` |
+| 英雄配置表/池 | 部分 | `CSoGame+0x78/+0x80` |
+| **逐单位星级** | **不可用** | 需 hook `starLevel` getter |
+
+### 实用结论
+
+"每名玩家的星级分布 + 棋盘英雄ID列表" 已足够支撑多数决策：
+
+- 知道对手有几个 2 星/3 星 → 判断战力
+- 知道自己有几个 2 星 → 判断还能不能合成
+- 星级变化时 `m_mapHeroStar` 的 value 会变 → **可检测升星事件**
+
+不能做的：判断"具体哪一个棋子是几星"（例如自动决定卖哪个）。
