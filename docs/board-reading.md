@@ -1519,3 +1519,45 @@ make -C <kernel_tree> M=$PWD modules
 
 禁止伪造 CRC 强行加载——之前验证过会直接 panic
 （`disagrees about version of symbol module_layout`）。
+
+---
+
+## 41. 界面方案：复用工具 APK 的 UI（进行中）
+
+悬浮球方案实测体验不佳，根因是 **ColorOS 不给非应用进程可交互窗口**：
+
+```
+ColorOS OplusSystemUINavigationGesture.processGestureEvent
+  -> Settings.Global.getInt(...)
+  -> AMS 抛 SecurityException: Unable to find app for caller
+  -> 进程被杀
+```
+
+两种窗口类型（2006 / 2038）都会崩，与是否挂触摸回调无关。
+规避手段（窗口只显示 + 从 /dev/input/event6 自己读触摸）能跑通，
+但交互手感差、字形需要预渲染图集（app_process 无字体框架，
+`new TextView()` 会命中 `Assertion failed: src == nullptr && gDefaultTypeface == nullptr`）。
+
+**结论：转向复用 `JCC_zpcnb666.apk` 的现成界面**，数据源换成本项目的内核只读。
+协议细节见 `docs/apk-ipc-protocol.md`。
+
+已完成的关键一步：自行生成并写入 IPC token，
+（`{"v":2,"tokenEpoch":1,"token":"<43字符base64url>"}`，放在
+`/data/user/0/com.android.support/app_ipc_v2/ipc_v2_current_token.json`），
+属主调整为应用 UID，因此客户端身份由我们掌握，**无需启动它自带的注入流程**。
+
+待办：`startServer()` 需要 `GameRegionState.isRuntimeReady()` 通过，
+目前启动 MainActivity 后 socket 未出现，下一步确认该判定条件。
+
+## 42. 本轮新增工具
+
+| 工具 | 说明 |
+|---|---|
+| `jccdash` | 8 人状态 + 牌池 + 每张牌命中率，`auto` 自动定位自己的 CPlayer |
+| `jcctapd` | 从 `/dev/input/event6` 读触摸，识别点球/拖动 |
+| `Ball.java` + `atlas.png` | 显示用悬浮窗，字形图集贴图，不碰字体 API |
+| `jccui.sh` / `jccfeed.sh` | 一键起停与数据刷新 |
+| `mktoken.py` | 生成并写入工具 APK 的 IPC token |
+| `memdis.py` / `a64.py` | 直接从进程内存读字节用 capstone 反汇编（磁盘 so 是加密的） |
+| `jcccallers` | 扫内存找 BL 调用者 |
+| `jccroll` | 高频同时采样商店签名与 RNG count |
