@@ -58,12 +58,12 @@ int main(int argc, char **argv)
     int pid, nreg, i;
     struct region *regs = NULL;
     unsigned char *buf;
-    int level, hpmin = 1, hpmax = 100, gmin = 0, gmax = 200;
+    int level, hpmin = 1, hpmax = 100, gmin = 0, gmax = 200, pageoff = -1;
     int hits = 0;
     unsigned long scanned = 0;
 
     if (argc < 3) {
-        printf("usage: jccfind <pid> <level> [hpmin] [hpmax] [goldmin] [goldmax]\n");
+        printf("usage: jccfind <pid> <level> [hpmin] [hpmax] [goldmin] [goldmax] [pageoff]\n");
         return 1;
     }
     pid = atoi(argv[1]);
@@ -72,6 +72,7 @@ int main(int argc, char **argv)
     if (argc > 4) hpmax = atoi(argv[4]);
     if (argc > 5) gmin = atoi(argv[5]);
     if (argc > 6) gmax = atoi(argv[6]);
+    if (argc > 7) pageoff = (int)strtol(argv[7], NULL, 0);
     if (drv_attach(pid) != 0) { printf("attach failed\n"); return 2; }
 
     nreg = load_regions(pid, &regs);
@@ -97,10 +98,17 @@ int main(int argc, char **argv)
             }
             scanned += want;
             /* 4 ????????????hp ??-4??old ??+0x10?????????????? */
-            for (k = 4; k + 0x10 + 4 <= want; k += 4) {
-                int lv, hp, gl;
+            for (k = 4; k + 0x14 + 4 <= want; k += 4) {
+                int lv, hp, gl, one, z4;
                 memcpy(&lv, buf + k, 4);
                 if (lv != level) continue;
+                /* ?????????????? 0xb8c? */
+                if (pageoff >= 0 && (int)((a + k - 4) & 0xFFF) != pageoff) continue;
+                /* ?????hp+0x08 ? 8 ?? 0?hp+0x14 ? 1 */
+                memcpy(&z4, buf + k + 4, 4);
+                if (z4 != 0) continue;
+                memcpy(&one, buf + k + 0x10, 4);
+                if (one != 1) continue;
                 memcpy(&hp, buf + k - 4, 4);
                 memcpy(&gl, buf + k + 0x0C, 4);
                 if (!in_range(hp, hpmin, hpmax)) continue;
