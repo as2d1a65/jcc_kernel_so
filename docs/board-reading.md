@@ -1449,3 +1449,73 @@ libil2cpp 热代码页一页内混着数百个函数
 - 金币不足或把握已达到即停
 
 实测 `buys=3 rolls=18`，买到 3 张 11400 并自动合成 2 星（棋盘 `21400`）。
+
+---
+
+## 40. 指令级 hook：方案与实现
+
+### 40.1 为什么不用 inline patch
+
+`libil2cpp` 是文件映射的代码页，4 KB 一页里混着几百个热函数。
+现有驱动的 `HOOK_ATTACH` 是**页级 PTE 重映射**，实测 `hits=5001 x0=0x0`
+（抓到的全是无关函数），且 `HOOK_READREG` 只能读 x0~x3，没有改写通路。
+
+### 40.2 改用 ARM64 硬件执行断点
+
+内核提供 `register_user_hw_breakpoint()`：对**任意用户态地址**下硬件执行断点，
+命中时在 overflow handler 里拿到该进程的 `struct pt_regs`。
+
+有了 `pt_regs` 就能做两件事：
+
+```c
+/* 强制函数立刻返回，x0 = 指定值 */
+regs->regs[0] = value;
+regs->pc      = regs->regs[30];   /* x30 = link register */
+```
+
+**不修改任何代码页**，libil2cpp 多热都不影响；页面上一个字节都没变。
+
+### 40.3 现有驱动已有一半
+
+驱动本身已经支持硬件断点并**能取回命中时的寄存器**：
+
+```
+HWBP_ADD(addr, HW_BP_TYPE_X, 4)   -> 装上
+HWBP_ENABLE(addr)
+HWBP_GET_HITS -> J_HWBP_HIT_ITEM { task_id, hit_addr, hit_time, regs_info }
+```
+
+缺的只是"改写寄存器"这一步，所以需要自己编一个模块。
+
+### 40.4 模块实现（kernel/jcck_hook.c）
+
+```
+/dev/jcckhook  ioctl:
+  HOOK_ADD   {pid, addr, mode, value} -> id
+  HOOK_DEL   {id}
+  HOOK_CLEAR
+  HOOK_STAT  {id} -> hits, last_x0
+mode: MODE_LOG 只记录 / MODE_RET 强制返回值
+```
+
+要点：
+
+- 非导出符号（`register_user_hw_breakpoint`、`find_get_task_by_vpid`）
+  通过 kprobe 引导拿到 `kallsyms_lookup_name` 后动态解析，无需 EXPORT
+- ARM64 只有 4~6 个断点寄存器，故 `HOOK_MAX=4`
+- handler 内用自旋锁保护槽位，只改 `pt_regs`，不做任何内存写
+
+### 40.5 编译前提
+
+内核模块必须与设备内核完全匹配（vermagic + 符号 CRC）。
+之前能编（`kernel/Module.symvers` 留有设备内核的 CRC 表），
+但那棵 6.1.57 源码树已不在工作区。
+
+需要重新获取设备内核源码（OnePlus Ace 3V / corvette，6.1.x）后：
+
+```
+make -C <kernel_tree> M=$PWD modules
+```
+
+禁止伪造 CRC 强行加载——之前验证过会直接 panic
+（`disagrees about version of symbol module_layout`）。
