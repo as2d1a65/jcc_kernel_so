@@ -797,3 +797,79 @@ jccboard <pid> <cplayer_addr>
 3. 用 `entityID` 追踪同一单位也不可靠，升星后会变
 
 自动合成/自动卖牌的实现必须每轮重新枚举棋盘。
+
+---
+
+## 31. 商店读取（已打通）
+
+### 31.1 位置
+
+商店**不在** `CPlayer+0x50 StoreController` 里（那是个 30 字段的子商店聚合器）。英雄商店在：
+
+```
+CPlayer + 0x450  m_stTACBuyHero -> Z_PVE.CTAC_HeroMgr
+   +0x20  m_mapHeroMgr    LinkedHashMap`2
+   +0x28  m_iMaxHeroNum   = 5     <- 商店格数
+   +0x2c  m_iPosType      = 3
+   +0x30  m_lUsedPos      = 0x1f  <- 位掩码，5 格全占
+```
+
+### 31.2 容器链
+
+```
+map + 0x10  entries 数组          + 0x40 internalCount (=5)
+entries 元素从 +0x20 开始，步长 0x20：
+   +0x00 hash(=slot)   +0x04 next   +0x08 prev   +0x0C seq
+   +0x10 CTAC_Hero*    +0x18 slot
+
+Z_PVE.CTAC_Hero
+   +0x10 m_stHeroEntity (TAC_HeroEntity*)
+   +0x1c m_iPos
+   +0x20 m_iBuddChildCnt (无伙伴时为 -1)
+   +0x24 m_iSrcPos
+   +0x28 m_bIsRealHero
+   +0x29 m_bIsPartnerHero
+   +0x2a m_iDragonEggsCfg
+
+TAC_HeroEntity
+   +0x10 _iEntityID
+   +0x14 _iHeroConfID   <- 星级编码在这里
+```
+
+### 31.3 费用解码
+
+配置表实测边界（`CTAC_HeroKuGroup.m_mapHeroQuality`）：
+
+| 费用 | 基础 ID 区间 |
+|---|---|
+| 1 费 | 11400 ~ 12399 |
+| 2 费 | 12400 ~ 13319 |
+| 3 费 | 13320 ~ 14329 |
+| 4 费 | 14330 ~ 15269 |
+| 5 费 | 15270 ~ 15403 |
+
+### 31.4 工具
+
+```
+jccshop <pid> <cplayer_addr>
+```
+
+实测输出：
+
+```
+CTAC_HeroMgr 0x6d8ec71d20  m_iMaxHeroNum=5  m_iPosType=3  m_lUsedPos=0x1f
+map 0x6d8ec70770  entries=0x7079a70dd0  internalCount=5
+
+ slot  pos  heroConfID  star  base   cost  entityID
+ 0     0     11412       1     11412  1     0x9280a
+ 1     1     11407       1     11407  1     0x9280b
+ 2     2     11405       1     11405  1     0x9280c
+ 3     3     12416       1     12416  2     0x9280d
+ 4     4     12414       1     12414  2     0x9280e
+```
+
+### 31.5 注意事项
+
+- 商店刷新后 `CTAC_Hero` 对象地址**全部重建**（实测两次读取之间对象地址完全变了），必须每次重读，不能缓存
+- 商店卡永远是 1 星（`heroConfID` 落在 11400~15403），星级解码对商店卡恒为 1
+- `m_lUsedPos` 的位掩码可以判断有几格有卡（空商店/锁定状态）
