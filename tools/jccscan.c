@@ -1,21 +1,20 @@
 /*
- * jccscan - 在目标进程内存里做只读扫描（全程走驱动 ioctl，无 ptrace、无 /proc/pid/mem）
+ * jccscan - ????????????????????????????????????????????????????????? ioctl?????? ptrace?????? /proc/pid/mem???
  *
- *   jccscan str <pid> <needle...>        扫 ASCII 字符串，打印命中地址
- *   jccscan ptr <pid> <hexvalue> [align] 扫 8 字节值（用于找指向某地址的指针）
- *   jccscan u64 <pid> <lo> <hi>          扫落在 [lo,hi) 区间的 8 字节值
- *
- * 只扫描可读区域；r--p 只读文件映射段驱动读不了，自动跳过。
+ *   jccscan str  <pid> <needle>              ASCII ?????????
+ *   jccscan ptr  <pid> <hexvalue>            8 ???????????????
+ *   jccscan u64  <pid> <hexlo> <hexhi>       8 ????????????
+ *   jccscan u32  <pid> <decvalue> [out]      32 ????????????????????????????????? out
+ *   jccscan filt <pid> <decvalue> <in> [out] ?????????????????? out ??????????????????
+ *   jccscan get  <pid> <in> <count>          ??? in ?????? count ???????????? 32 ??????
  */
 #include "jccdrv.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <ctype.h>
 
 #define CHUNK (1u << 20)
-#define OVERLAP 4096
 
 struct region {
     unsigned long lo, hi;
@@ -27,7 +26,7 @@ static int load_regions(int pid, struct region **out)
 {
     char p[64], line[1024];
     FILE *f;
-    int n = 0, cap = 512;
+    int n = 0, cap = 1024;
     struct region *r = calloc((size_t)cap, sizeof(*r));
 
     snprintf(p, sizeof(p), "/proc/%d/maps", pid);
@@ -48,66 +47,116 @@ static int load_regions(int pid, struct region **out)
     return n;
 }
 
-/* r--p 文件映射段驱动读不了，跳过；纯 ---p 也跳过 */
 static int skippable(const struct region *r)
 {
     if (r->perms[0] != 'r') return 1;
-    if (r->perms[2] == 'x') return 0;                    /* r-xp 可读，保留 */
-    if (r->perms[1] != '-') return 0;                    /* rw- 保留 */
-    if (r->path[0] == 0) return 0;                       /* 匿名 r-- 保留 */
-    return 1;                                            /* r-- + 有路径 -> 跳过 */
+    if (r->perms[2] == 'x') return 0;
+    if (r->perms[1] != '-') return 0;
+    if (r->path[0] == 0) return 0;
+    return 1;
 }
 
-static const char *fmt_perms(const struct region *r) { return r->perms; }
+/* ?????????????????????????????????????????? */
+static unsigned long cache_page = 0;
+static unsigned char cache_buf[4096];
+static int cache_ok = 0;
+
+static int read32_cached(int pid, unsigned long addr, unsigned int *out)
+{
+    unsigned long pg = addr & ~0xFFFUL;
+    if (pg != cache_page || !cache_ok) {
+        if (drv_read((uintptr_t)pg, cache_buf, 4096) != 0) { cache_ok = 0; cache_page = 0; return -1; }
+        cache_page = pg; cache_ok = 1;
+    }
+    memcpy(out, cache_buf + (addr & 0xFFF), 4);
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
     int pid, nreg, i;
     struct region *regs = NULL;
     unsigned char *buf;
-    unsigned long total = 0, scanned = 0;
 
     if (argc < 4) {
         printf("usage:\n");
-        printf("  jccscan str <pid> <needle>\n");
-        printf("  jccscan ptr <pid> <hexvalue>\n");
-        printf("  jccscan u64 <pid> <hexlo> <hexhi>\n");
+        printf("  jccscan str  <pid> <needle>\n");
+        printf("  jccscan ptr  <pid> <hexvalue>\n");
+        printf("  jccscan u64  <pid> <hexlo> <hexhi>\n");
+        printf("  jccscan u32  <pid> <decvalue> [outfile]\n");
+        printf("  jccscan filt <pid> <decvalue> <infile> [outfile]\n");
+        printf("  jccscan get  <pid> <infile> <count>\n");
         return 1;
     }
     const char *mode = argv[1];
     pid = atoi(argv[2]);
     if (drv_attach(pid) != 0) { printf("attach failed\n"); return 2; }
 
+    /* ---- filt????????????????????????????????? ---- */
+    if (!strcmp(mode, "filt")) {
+        unsigned int want = (unsigned int)strtoul(argv[3], NULL, 0);
+        FILE *in, *out = NULL;
+        unsigned long addr;
+        int kept = 0, total = 0;
+        if (argc < 5) { printf("filt ?????? infile\n"); return 1; }
+        in = fopen(argv[4], "r");
+        if (!in) { printf("open %s failed\n", argv[4]); return 3; }
+        if (argc > 5) out = fopen(argv[5], "w");
+        while (fscanf(in, "%lx", &addr) == 1) {
+            unsigned int v;
+            total++;
+            if (read32_cached(pid, addr, &v) != 0) continue;
+            if (v != want) continue;
+            kept++;
+            if (out) fprintf(out, "%lx\n", addr);
+            else if (kept <= 30) printf("  0x%lx\n", addr);
+        }
+        fclose(in);
+        if (out) fclose(out);
+        printf("?????? %d ?????????????????? %d ??????????????? %u???\n", total, kept, want);
+        return 0;
+    }
+
+    /* ---- get?????????????????????????????? ---- */
+    if (!strcmp(mode, "get")) {
+        FILE *in;
+        unsigned long addr;
+        int cnt = (argc > 4) ? atoi(argv[4]) : 40, shown = 0;
+        in = fopen(argv[3], "r");
+        if (!in) { printf("open %s failed\n", argv[3]); return 3; }
+        while (fscanf(in, "%lx", &addr) == 1 && shown < cnt) {
+            unsigned int v = 0;
+            if (read32_cached(pid, addr, &v) != 0) { printf("  0x%lx  <read failed>\n", addr); continue; }
+            printf("  0x%lx  = %u (0x%x)\n", addr, v, v);
+            shown++;
+        }
+        fclose(in);
+        return 0;
+    }
+
     nreg = load_regions(pid, &regs);
     if (nreg <= 0) { printf("no regions\n"); return 2; }
-
-    buf = malloc(CHUNK + OVERLAP);
+    buf = malloc(CHUNK);
     if (!buf) return 2;
 
     unsigned long needle_val = 0, lo_val = 0, hi_val = 0;
     const char *needle = NULL;
     size_t nlen = 0;
-    if (!strcmp(mode, "str")) {
-        needle = argv[3];
-        nlen = strlen(needle);
-    } else if (!strcmp(mode, "ptr")) {
-        needle_val = strtoul(argv[3], NULL, 16);
-    } else if (!strcmp(mode, "u64")) {
-        if (argc < 5) { printf("u64 需要 lo hi\n"); return 1; }
+    unsigned int want32 = 0;
+    FILE *outfile = NULL;
+    if (!strcmp(mode, "str")) { needle = argv[3]; nlen = strlen(needle); }
+    else if (!strcmp(mode, "ptr")) { needle_val = strtoul(argv[3], NULL, 16); }
+    else if (!strcmp(mode, "u64")) {
+        if (argc < 5) { printf("u64 ?????? lo hi\n"); return 1; }
         lo_val = strtoul(argv[3], NULL, 16);
         hi_val = strtoul(argv[4], NULL, 16);
-    } else {
-        printf("unknown mode\n"); return 1;
-    }
+    } else if (!strcmp(mode, "u32")) {
+        want32 = (unsigned int)strtoul(argv[3], NULL, 0);
+        if (argc > 4) outfile = fopen(argv[4], "w");
+    } else { printf("unknown mode\n"); return 1; }
 
     int hits = 0;
-    for (i = 0; i < nreg; i++) {
-        unsigned long a;
-        if (skippable(&regs[i])) continue;
-        total += regs[i].hi - regs[i].lo;
-    }
-    printf("待扫描区域共 %lu MB（已跳过 r-- 只读文件映射）\n", total >> 20);
-
+    unsigned long scanned = 0;
     for (i = 0; i < nreg; i++) {
         unsigned long a;
         if (skippable(&regs[i])) continue;
@@ -116,37 +165,40 @@ int main(int argc, char **argv)
             size_t k;
             if (drv_read((uintptr_t)a, buf, want) != 0) continue;
             scanned += want;
-            if (((scanned >> 20) & 0x3FF) == 0) {
-                printf("  ... %lu MB\n", scanned >> 20);
-                fflush(stdout);
-            }
             if (!strcmp(mode, "str")) {
                 for (k = 0; k + nlen <= want; k++) {
                     if (buf[k] != (unsigned char)needle[0]) continue;
                     if (memcmp(buf + k, needle, nlen) == 0) {
-                        printf("STR  0x%lx  region=%s %s\n", a + k, fmt_perms(&regs[i]), regs[i].path);
-                        if (++hits > 400) { printf("... 命中过多，截断\n"); goto done; }
+                        printf("STR  0x%lx\n", a + k);
+                        if (++hits > 400) goto done;
                     }
+                }
+            } else if (!strcmp(mode, "u32")) {
+                for (k = 0; k + 4 <= want; k += 4) {
+                    unsigned int v;
+                    memcpy(&v, buf + k, 4);
+                    if (v != want32) continue;
+                    hits++;
+                    if (outfile) fprintf(outfile, "%lx\n", a + k);
+                    else if (hits <= 40) printf("  U32 0x%lx\n", a + k);
                 }
             } else {
                 for (k = 0; k + 8 <= want; k += 8) {
                     unsigned long v;
                     memcpy(&v, buf + k, 8);
-                    if (!strcmp(mode, "ptr")) {
-                        if (v != needle_val) continue;
-                    } else {
-                        if (v < lo_val || v >= hi_val) continue;
-                    }
-                    printf("VAL  0x%lx  = 0x%lx  region=%s %s\n",
-                           a + k, v, fmt_perms(&regs[i]), regs[i].path);
-                    if (++hits > 400) { printf("... 命中过多，截断\n"); goto done; }
+                    if (!strcmp(mode, "ptr")) { if (v != needle_val) continue; }
+                    else { if (v < lo_val || v >= hi_val) continue; }
+                    printf("VAL  0x%lx  = 0x%lx\n", a + k, v);
+                    if (++hits > 400) goto done;
                 }
             }
         }
     }
 done:
-    printf("扫描 %lu MB，命中 %d 条\n", scanned >> 20, hits);
+    if (outfile) fclose(outfile);
+    printf("?????? %lu MB????????? %d ????????? %s???\n", scanned >> 20, hits,
+           !strcmp(mode, "u32") ? argv[3] : "-");
     free(buf);
     free(regs);
-    return 0;
+    return hits;
 }
