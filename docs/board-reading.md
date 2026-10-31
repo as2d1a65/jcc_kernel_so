@@ -308,3 +308,78 @@ jccscan 修复三处：
 ```
 
 `jccfind` / `jccread` / `jccplayer` 仍用旧过滤规则，若需要扫元数据要同步修改。
+
+---
+
+## 13. `m_mapHeroStar` 语义已确认
+
+`CPlayerGameStatistics.m_mapHeroStar` @0x1a0，`LinkedHashMap`2`，条目 0x18 字节：
+
+```
++0x00 int32 hashCode
++0x04 int32 next
++0x08 int32 prev
++0x0C int32 reserved
++0x10 int32 key        <- 星级
++0x14 int32 value      <- 该星级的单位数量
+```
+
+四个玩家实测对照：
+
+| 座位 | internalCount | 条目 |
+|---|---|---|
+| 7（等级7） | 2 | key=2 → 6 个，key=3 → 1 个 |
+| 1（等级9） | 1 | key=2 → 4 个 |
+
+**结论：这是「星级 → 单位数」的聚合统计，不含"哪个单位几星"。** 只统计 ≥2 星的单位（1 星不入表）。
+
+## 14. `starLevel` 在元数据里是属性而非字段
+
+用 `jccfindfield <pid> starLevel` 找到 7 处引用，结构一致：
+
+```
++0x00  name 指针（指向 "starLevel"）
++0x08  0
++0x0C  0x0802e640 之类（token / id）
++0x10  0x70cd2c8060（Il2CppType，疑似 int32）
++0x18  负数（不是合理的字段偏移）
++0x20  0x70d02dc620（**落在 libil2cpp 代码区**）
+```
+
+`+0x20` 是代码指针，说明这不是 FieldInfo，而是带 getter 的**属性**。游戏自己的成员缓存表记录了 `starLevel` 的读取函数地址 `0x70d02dc620`。
+
+这也解释了为什么 `jccfields` 在四个类里都找不到 `starLevel`——它不是字段。
+
+**不能走 hook 拿它**：`libil2cpp` 代码段的 PTE 钩子实测不可用（HANDOFF 4.5.2，`hits=5001 x0=0x0`）。
+
+## 15. 仍未打通的逐单位星级
+
+已排查并排除：
+
+| 位置 | 结论 |
+|---|---|
+| `TAC_HeroEntity` +0x18/+0x1c | 非星级（同英雄两副本值不同、含浮点） |
+| `m_mapHeroStar` | 星级→数量，聚合值 |
+| `m_vecBattleHero` @0x100 | `_size=3` 但 `_items` 数组头 `max_length=0`，布局需重推 |
+| `m_mapHeroPromotionTree` | `entries` 落在 r--p 段，驱动读不到 |
+
+未排查完的入口：
+
+| 入口 | 状态 |
+|---|---|
+| `CPlayer.LatestBattleHeroDic` @0x4f0 | `internalCount=22`，`entries` 可读，条目含 entityID（`0x18709` 这类），布局待推 |
+| `CPlayer.SurplusHeroList` @0x3e0 | 未展开 |
+| `CPlayer._vecBattleHeroPos` @0x400 | 未展开 |
+| 游戏成员缓存表 | 已知含 `starLevel` 的 getter 地址，但要靠 hook 才能用 |
+
+## 16. 工具补充
+
+```
+jccfindfield <pid> <fieldname>
+```
+
+按名字反查成员：扫全内存找名字串 → 找指向它的槽 → 按 FieldInfo 解读并打印 `parent` 类名与 `offset`。失败时打印原始上下文，便于识别真实布局。
+
+实测 `starLevel` 输出 7 个候选槽，并把结构打印出来（即第 14 节的分析来源）。
+
+**注意**：该工具与 `jccscan` 一致，接受 `rw-s` 映射、`cap=8192`、逐页读回退。`jccfind` / `jccread` / `jccplayer` 仍是旧规则。
