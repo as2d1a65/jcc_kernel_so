@@ -8,6 +8,8 @@ jcc（`com.tencent.jkchess`）内核态辅助模块 + 用户态对接层。
 >
 > 静态资料清单见 [`docs/static-inventory.md`](docs/static-inventory.md)。
 >
+> 原外挂的读取模型（挂哪些方法、有哪些功能命令）见 [`docs/libdemo-analysis.md`](docs/libdemo-analysis.md)。
+>
 > 第三方内核驱动（RT-hook）及其 ABI 说明见 [`driver/README.md`](driver/README.md)。
 
 ---
