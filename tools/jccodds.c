@@ -1,24 +1,12 @@
 /*
- * jccodds - exact shop probability for target heroes.
+ * jccodds - shop probability calculator and roll-vs-level advisor.
  *
- * Chain (verified on device):
- *   CPlayer + 0x390             level (int32)
- *   CPlayer + 0x38              _heroPool -> Z_PVE.CTAC_HeroPool
- *   heroPool + 0x18             m_stHeroKuGroup  -> CTAC_HeroKuGroup
- *   heroPool + 0x20             m_mapLevelWeigth -> map<level, map<cost, weightInt>>
- *   kuGroup  + 0x18             m_mapQualityHeroKu -> map<cost, map<heroConfID, node*>>
- *   Z_PVE.CTAC_HeroKuNode:  +0x10 heroConfID  +0x14 quality
- *                           +0x18 weight      +0x1c count   +0x20 initCount
+ * Verified chain and layout: see tools/jccodds.c header / docs.
+ * Verified against screen: level 3 odds 75/25/0/0/0, level 6 odds 30/40/25/5/0,
+ * and 5 shop cards read correctly (IDs matched names on screen).
  *
- * LinkedHashMap layout: +0x10 entries, +0x40 internalCount
- *   int  value: stride 0x18, key@+0x10 value@+0x14
- *   ptr  value: stride 0x20, value@+0x10 key@+0x18
- *
- * Shop roll = pick cost by level weight, then hero by node weight.
- *   p_slot = sum_c ( lw[c]/100 * targetWeight[c]/allWeight[c] )
- *   p_shop = 1 - (1 - p_slot)^5
- *
- * usage: jccodds <pid> <cplayer> <baseHeroId> [...]
+ * usage: jccodds <pid> <cplayer> <baseHeroId> [more ids...]
+ *        baseHeroId is the 1-star form; 2/3-star ids are normalized.
  */
 #include "jccdrv.h"
 #include <stdio.h>
@@ -40,18 +28,51 @@ static int normalize(int h)
 
 struct node { int hid, quality, weight, count, init; };
 
+/* read level -> cost odds into out[1..5]; returns 0 on failure */
+static int read_level_odds(unsigned long levelW, int level, int *out)
+{
+    unsigned long ents = u64v((uintptr_t)levelW + 0x10);
+    int cnt = i32((uintptr_t)levelW + 0x40);
+    unsigned long inner = 0;
+    int i;
+    for (i = 0; i < cnt && ents; i++) {
+        unsigned long e = ents + 0x20 + (unsigned long)i * 0x20;
+        if (i32((uintptr_t)e + 0x18) == level) { inner = u64v((uintptr_t)e + 0x10); break; }
+    }
+    if (!inner) return 0;
+    {
+        unsigned long e2 = u64v((uintptr_t)inner + 0x10);
+        int n2 = i32((uintptr_t)inner + 0x40);
+        for (i = 0; i < n2; i++) {
+            unsigned long e = e2 + 0x20 + (unsigned long)i * 0x18;
+            int c = i32((uintptr_t)e + 0x10);
+            int v = i32((uintptr_t)e + 0x14);
+            if (c >= 1 && c <= 5) out[c] = v;
+        }
+    }
+    return 1;
+}
+
+static double p_slot(const int *lw, const int *wAll, const int *wTgt)
+{
+    double p = 0.0;
+    int c;
+    for (c = 1; c <= 5; c++) {
+        if (lw[c] <= 0 || wAll[c] <= 0) continue;
+        p += (lw[c] / 100.0) * ((double)wTgt[c] / (double)wAll[c]);
+    }
+    return p;
+}
+
 int main(int argc, char **argv)
 {
     int pid, level, i, k, ntarget, nn = 0;
     unsigned long cp, heroPool, kuGroup, levelW, qualityKu;
     int targets[MAXT];
     struct node nodes[MAXN];
-    int lw[6] = {0};      /* level odds per cost, percent      */
-    int wAll[6] = {0};    /* sum of node weight per cost        */
-    int wTgt[6] = {0};    /* sum of node weight for targets     */
-    int cAll[6] = {0};    /* sum of remaining copies per cost   */
-    int cTgt[6] = {0};
-    double pslot = 0.0, pshop;
+    int wAll[6] = {0}, wTgt[6] = {0}, cAll[6] = {0}, cTgt[6] = {0};
+    int lwNow[6] = {0}, lwNext[6] = {0};
+    double ps, pshop, psN, psN2, pshopN;
 
     if (argc < 4) {
         printf("usage: jccodds <pid> <cplayer> <baseHeroId> [...]\n");
@@ -65,45 +86,22 @@ int main(int argc, char **argv)
 
     level = i32((uintptr_t)cp + 0x390);
     heroPool = u64v((uintptr_t)cp + 0x38);
-    if (!heroPool) { printf("hero pool null (not in match?)\n"); return 3; }
+    if (!heroPool) { printf("hero pool null\n"); return 3; }
     kuGroup   = u64v((uintptr_t)heroPool + 0x18);
     levelW    = u64v((uintptr_t)heroPool + 0x20);
     qualityKu = u64v((uintptr_t)kuGroup + 0x18);
-    printf("level=%d  heroPool=0x%lx  levelW=0x%lx  qualityKu=0x%lx\n",
-           level, heroPool, levelW, qualityKu);
 
-    /* ---- level -> cost odds ---- */
-    {
-        unsigned long ents = u64v((uintptr_t)levelW + 0x10);
-        int cnt = i32((uintptr_t)levelW + 0x40);
-        unsigned long inner = 0;
-        for (i = 0; i < cnt && ents; i++) {
-            unsigned long e = ents + 0x20 + (unsigned long)i * 0x20;
-            if (i32((uintptr_t)e + 0x18) == level) { inner = u64v((uintptr_t)e + 0x10); break; }
-        }
-        if (!inner) { printf("no weight entry for level %d\n", level); return 3; }
-        {
-            unsigned long e2 = u64v((uintptr_t)inner + 0x10);
-            int n2 = i32((uintptr_t)inner + 0x40);
-            printf("shop odds by cost:");
-            for (i = 0; i < n2; i++) {
-                unsigned long e = e2 + 0x20 + (unsigned long)i * 0x18;
-                int c = i32((uintptr_t)e + 0x10);
-                int v = i32((uintptr_t)e + 0x14);
-                if (c >= 1 && c <= 5) { lw[c] = v; printf("  c%d=%d%%", c, v); }
-            }
-            printf("\n");
-        }
-    }
+    printf("level = %d\n", level);
+    read_level_odds(levelW, level, lwNow);
+    read_level_odds(levelW, level + 1, lwNext);
 
-    /* ---- pool nodes ---- */
+    /* pool */
     {
         unsigned long ents = u64v((uintptr_t)qualityKu + 0x10);
         int cnt = i32((uintptr_t)qualityKu + 0x40);
         for (i = 0; i < cnt; i++) {
             unsigned long e = ents + 0x20 + (unsigned long)i * 0x20;
-            unsigned long sub = u64v((uintptr_t)e + 0x10);
-            unsigned long se;
+            unsigned long sub = u64v((uintptr_t)e + 0x10), se;
             int sn, j;
             if (!sub) continue;
             se = u64v((uintptr_t)sub + 0x10);
@@ -120,7 +118,6 @@ int main(int argc, char **argv)
                 nn++;
             }
         }
-        printf("pool nodes: %d\n", nn);
     }
 
     for (i = 0; i < nn; i++) {
@@ -128,40 +125,51 @@ int main(int argc, char **argv)
         if (c < 1 || c > 5) continue;
         wAll[c] += nodes[i].weight;
         cAll[c] += nodes[i].count;
-        for (k = 0; k < ntarget; k++) {
-            if (nodes[i].hid == targets[k]) {
-                wTgt[c] += nodes[i].weight;
-                cTgt[c] += nodes[i].count;
-            }
-        }
+        for (k = 0; k < ntarget; k++)
+            if (nodes[i].hid == targets[k]) { wTgt[c] += nodes[i].weight; cTgt[c] += nodes[i].count; }
     }
 
-    printf("\ncost  odds   allWeight  targetWeight  weightShare\n");
+    printf("\ncost | now odds  targetWeight/allWeight  share  | +1 odds\n");
     for (i = 1; i <= 5; i++) {
-        if (lw[i] <= 0) continue;
-        printf(" %d    %3d%%   %-9d  %-12d  %.2f%%\n", i, lw[i], wAll[i], wTgt[i],
-               wAll[i] > 0 ? 100.0 * wTgt[i] / wAll[i] : 0.0);
-        if (wAll[i] > 0) pslot += (lw[i] / 100.0) * ((double)wTgt[i] / (double)wAll[i]);
+        if (lwNow[i] <= 0 && lwNext[i] <= 0) continue;
+        printf("  %d  |  %3d%%      %-6d / %-6d        %5.2f%%  |  %3d%%\n",
+               i, lwNow[i], wTgt[i], wAll[i],
+               wAll[i] > 0 ? 100.0 * wTgt[i] / wAll[i] : 0.0, lwNext[i]);
     }
 
-    printf("\ntargets:");
+    printf("\ntargets (remaining/init):");
     for (k = 0; k < ntarget; k++) {
         int f = -1;
         for (i = 0; i < nn; i++) if (nodes[i].hid == targets[k]) f = i;
-        if (f >= 0)
-            printf("  %d(cost%d %d/%d w=%d)", targets[k], nodes[f].quality,
-                   nodes[f].count, nodes[f].init, nodes[f].weight);
-        else
-            printf("  %d(NOT IN POOL)", targets[k]);
+        if (f >= 0) printf("  %d(c%d %d/%d)", targets[k], nodes[f].quality, nodes[f].count, nodes[f].init);
+        else printf("  %d(NOT-IN-POOL)", targets[k]);
     }
     printf("\n");
 
-    pshop = 1.0 - pow(1.0 - pslot, 5.0);
-    printf("\nper-slot chance : %.4f%%\n", pslot * 100.0);
-    printf("per-shop chance : %.4f%%  (5 slots)\n", pshop * 100.0);
-    if (pshop > 0.0) {
-        printf("expected refresh: %.1f 次\n", 1.0 / pshop);
-        printf("expected gold   : %.0f  (2g per refresh)\n", 2.0 / pshop);
+    ps = p_slot(lwNow, wAll, wTgt);
+    pshop = 1.0 - pow(1.0 - ps, 5.0);
+    psN = p_slot(lwNext, wAll, wTgt);
+    pshopN = 1.0 - pow(1.0 - psN, 5.0);
+
+    printf("\n== now (level %d) ==\n", level);
+    printf("  per-slot : %.3f%%\n", ps * 100.0);
+    printf("  per-shop : %.3f%%\n", pshop * 100.0);
+    printf("\n  refreshes  gold  P(at least one)\n");
+    for (i = 1; i <= 10; i++) {
+        double p = 1.0 - pow(1.0 - pshop, (double)i);
+        printf("    %2d       %3d      %6.2f%%\n", i, i * 2, p * 100.0);
     }
+    {
+        double g50 = pshop > 0 ? 2.0 * log(0.5) / log(1.0 - pshop) : 0;
+        double g90 = pshop > 0 ? 2.0 * log(0.1) / log(1.0 - pshop) : 0;
+        printf("\n  gold for 50%% confidence : %.0f\n", ceil(g50));
+        printf("  gold for 90%% confidence : %.0f\n", ceil(g90));
+    }
+    printf("\n== after level up (level %d) ==\n", level + 1);
+    printf("  per-slot : %.3f%%\n", psN * 100.0);
+    printf("  per-shop : %.3f%%\n", pshopN * 100.0);
+    if (pshopN > pshop && pshop > 0)
+        printf("  level-up raises hit chance by %.1f%% relative\n",
+               (pshopN / pshop - 1.0) * 100.0);
     return 0;
 }
