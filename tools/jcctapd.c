@@ -30,9 +30,9 @@
 
 #define SCREEN_W 2780
 #define SCREEN_H 1264
-#define BALL_R   54
+#define BALL_R   42
 #define STATE    "/data/local/tmp/jcc_ui_state"
-#define LONG_MS  400
+#define LONG_MS  0
 #define MOVE_TOL 40
 
 static int   g_open = 0;
@@ -117,7 +117,7 @@ int main(int argc, char **argv)
                         if (g_bx > SCREEN_W - 60) g_bx = SCREEN_W - 60;
                         if (g_by > SCREEN_H - 60) g_by = SCREEN_H - 60;
                         save_state();
-                    } else if (down && !moved && dur >= LONG_MS) {
+                    } else if (down && !moved && in_ball(start_x, start_y)) {
                         g_open = !g_open;
                         save_state();
                     }

@@ -28,10 +28,10 @@ public class Ball {
     static final String ATLAS = "/data/local/tmp/atlas.png";
     static final String STATE = "/data/local/tmp/jcc_ui_state";
 
-    static final int CELL_W = 20, CELL_H = 30, COLS = 16;
-    static final int BALL_D = 108;
-    static final int PAD = 16;
-    static final int LINE = 30;
+    static final int CELL_W = 15, CELL_H = 22, COLS = 16;
+    static final int BALL_D = 84;
+    static final int PAD = 12;
+    static final int LINE = 22;
     static final int SW = 2780, SH = 1264;
 
     static Bitmap atlas;
@@ -87,6 +87,7 @@ public class Ball {
         final Paint ball = new Paint();
         final Paint ring = new Paint();
         final Paint tx = new Paint();
+        final Paint ring2 = new Paint();
 
         V(Context ctx) {
             super(ctx);
@@ -100,6 +101,8 @@ public class Ball {
             ring.setAntiAlias(true);
             tx.setColor(0xFFBFFFD0);
             tx.setAntiAlias(true);
+            ring2.setColor(0xFFFFFFFF);
+            ring2.setAntiAlias(true);
         }
 
         @Override
@@ -112,11 +115,17 @@ public class Ball {
                 return;
             }
             RectF rf = new RectF(0, 0, getWidth(), getHeight());
-            c.drawRoundRect(rf, 18, 18, bg);
+            c.drawRoundRect(rf, 14, 14, bg);
             int maxLines = (getHeight() - PAD * 2) / LINE;
             int n = lines.length < maxLines ? lines.length : maxLines;
             for (int i = 0; i < n; i++)
                 drawText(c, tx, lines[i], PAD, PAD + i * LINE);
+            /* close button sits exactly where the ball was, so the same
+               tap region collapses the panel */
+            float r = BALL_D / 2f;
+            c.drawCircle(r, r, r - 3, ball);
+            c.drawCircle(r, r, r - 3, ring);
+            drawText(c, ring2, "X", (int) (r - CELL_W / 2f), (int) (r - CELL_H / 2f));
         }
     }
 

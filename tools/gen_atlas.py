@@ -1,7 +1,7 @@
 from PIL import Image, ImageDraw, ImageFont
 import os
 
-W, H = 20, 30          # cell size
+W, H = 15, 22          # cell size
 COLS = 16
 CHARS = ''.join(chr(c) for c in range(32, 127))   # ASCII 32..126 -> 95 glyphs
 ROWS = (len(CHARS) + COLS - 1) // COLS
@@ -16,7 +16,7 @@ for cand in [
     r'C:\Windows\Fonts\segoeui.ttf',
 ]:
     if os.path.exists(cand):
-        font = ImageFont.truetype(cand, 24)
+        font = ImageFont.truetype(cand, 19)
         print('font:', cand)
         break
 if font is None:
