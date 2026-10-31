@@ -140,3 +140,85 @@ jccd regs <pid> <method_addr> <秒>     抓一次并 dump x0~x30（实际只有 
 | `jccplayer` 自动重找 | 正常，无需任何重新配置 |
 
 **结论：换局只需重读实例地址，元数据（类/字段/方法）在进程生命周期内稳定。**
+
+---
+
+## 10. 星级定位进展（未完成，已排除两条路）
+
+### 10.1 已排除：`TAC_HeroEntity` 里没有星级
+
+该类只有两个数据字段：
+
+```
++0x10  _iEntityID
++0x14  _iHeroConfID
+```
+
+对象大小 **0x20 字节**（实测两个实体地址相差 0x20，且池内紧邻排列）。`+0x18` / `+0x1c` 是仅有的两个额外 int，但实测无法对应星级：
+
+| heroConfID | +0x18 |
+|---|---|
+| 12411 | 0 |
+| 15281 | 1 |
+| 11404 | 0x3f800000 (1.0f) |
+| 13325（副本 A） | 0 |
+| 13325（副本 B） | 4 |
+
+同一个英雄的两个副本值不同，且存在浮点值，判为**非星级**。
+
+**注意：dump 实体时必须只取 0x20 字节**。取 0xC0 会把邻居实体的数据一起拍进来，diff 全是噪声（踩过这个坑）。
+
+### 10.2 已定位：星级在英雄管理器的嵌套 map 里
+
+```
+CPlayer + 0x450  m_stTACBuyHero   -> Z_PVE.CTAC_HeroMgr
+   +0x20  m_mapHeroMgr            -> LinkedHashMap`2
+   +0x28  m_iMaxHeroNum = 5
+   +0x2c  m_iPosType    = 3
+
+m_mapHeroMgr 的 LinkedHashMap 字段：
+   +0x10 entries
+   +0x18 buckets
+   +0x20 comparer
+   +0x28 keys
+   +0x30 values
+   +0x40 internalCount   <- 实测 5，与场上单位数一致
+   +0x44 version
+   +0x48 freeList
+   +0x4c freeCount
+   +0x50 headIndex
+   +0x54 tailIndex
+```
+
+`values` 里是 `{key, innerMap}` 配对，步长 0x10，其中 `innerMap` 也是 `LinkedHashMap`2`：
+
+```
+0x7078a552a0: 10 82 ff 45 70 00 00 00   30 02 16 f0 6f 00 00 00
+              ^key (0x7045ff8210)        ^inner map (0x6ff0160230)
+0x7078a552c0: 10 82 ff 45 70 00 00 00   a0 09 16 f0 6f 00 00 00
+              ^同一个 key                ^另一个 inner map (0x6ff01609a0)
+```
+
+两个同 heroConfID 的单位共享同一个 key，但各有独立的 inner map —— **星级就在各自的 inner map 里**。
+
+### 10.3 当前障碍
+
+`entries` 指针（实测 `0x70689a6660`）**驱动读不到**（落在 `r--p` 段或未驻留页）。这是已知限制（见 HANDOFF 4.5.4）。
+
+绕法：
+1. 从 `buckets`（`int[]`）或 `headIndex/tailIndex` 链式遍历，避开 `entries`
+2. 或换一个 `entries` 落在可读区的实例
+3. 或用 `keys`/`values` 数组——但实测 `keys` 为 null，`values` 是上述配对区
+
+### 10.4 备选（更快）
+
+英雄合成时会调用 `CPlayer.TAC_DoHeroPromotionByTurnState`（`0x70d0ea180c`）等三个升星方法。若能拿到它们的参数，星级直接可见。但 `HOOK_ATTACH` 在 `libil2cpp` 代码段不可用——实测 `hits=5001 x0=0x0`，因为 4KB 页里混有高频函数，PTE 钩子被灌满（见 HANDOFF 4.5.2）。
+
+## 11. 工具补充
+
+```
+jccsnap <pid> <cplayer> <out.bin>    把每个棋盘实体的 0x20 字节原始数据写成二进制快照
+tools/diffsnap.py <A.bin> <B.bin>    两份快照逐字段比对（int/float 双解释）
+```
+
+用途：合成/买卖前后各拍一次，diff 出变化的字段。
