@@ -501,3 +501,38 @@ jccscan ptr <pid> <S去掉0x>            找到指向 S 的槽
 类指针 = 槽 - 0x10
 jccfields <pid> <类指针>               打印该类全部字段
 ```
+
+---
+
+## 21. 逐单位星级：全部候选入口均已排查（均失败）
+
+| 入口 | 实测结果 |
+|---|---|
+| `CSoGame+0x1a0 ListBattleHeroDatas` | `LinkedHashMap`2`，4 条目 → `List<TAC_BattleGroundHero>` → `stHeroEntity`(只有 id+confID) |
+| `CPlayer+0x4f0 LatestBattleHeroDic` | `entries` 全 `-1`，`freeCount==internalCount` = **空表** |
+| `CPlayer+0x40 HeroPromotionMgr+0x18 m_mapHeroPromotionTree` | `internalCount=9, freeCount=9, headIndex=-1` = **空表** |
+| `CPlayer+0x450 CTAC_HeroMgr+0x20 m_mapHeroMgr` | 内层 `LinkedHashMap` `internalCount=1, freeCount=1` = **空表** |
+| `TAC_HeroEntity` +0x18/+0x1c | 同英雄两副本值不同、含浮点，非星级 |
+| `CSoGame+0x80 _vecWaitHero` | `_size=958` 的全局池，元素为 null，不是备战席 |
+| `{星级,英雄ID}` 整数对搜索 | 排列 B 有命中（`0x380100000001`），但上下文是英雄池计数表，非单位星级 |
+
+**规律**：`LatestBattleHeroDic` / `m_mapHeroPromotionTree` / `m_mapHeroMgr` 这三张表都是**战斗期缓存**，在备战期全部为空。要验证它们必须在对战进行中抓。
+
+### 已确认的替代数据
+
+`CPlayerGameStatistics.m_mapHeroStar` @0x1a0 提供**聚合**星级分布：
+
+```
+chair 7: 2星 6 个，3星 1 个
+chair 1: 2星 4 个
+```
+
+条目布局 0x18 字节：`{hash, next, prev, reserved, key=星级, value=数量}`。
+
+## 22. 下一步建议（最快路径）
+
+**请用户在合成瞬间给出该单位的格子坐标**，然后直接对比该格实体与一个 1 星实体的内存差异。
+
+理由：`vecBattleHeroPos` 已能读出每个单位的 `{坐标, entityID, heroConfID, 实体地址}`，同一格子的实体地址在对局内稳定，两次 dump 同一地址即可隔离出星级字段，不需要遍历任何容器。
+
+这是目前唯一能绕开"容器为空/读不到"的方法。
